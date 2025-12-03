@@ -28,6 +28,9 @@ class DownloadFactory:
         if not url:
             raise NotADownloadableLinkError("No url provided by the reddit API")
         sanitised_url = DownloadFactory.sanitise_url(url).lower()
+        if re.match(r"soundgasm\.net", sanitised_url):
+            from bdfrx.site_downloaders.soundgasm import Soundgasm
+            return Soundgasm
         if re.match(r"(i\.|m\.|o\.)?imgur", sanitised_url):
             return Imgur
         if re.match(r"(i\.|thumbs\d{1,2}\.|v\d\.)?(redgifs|gifdeliverynetwork)", sanitised_url):
