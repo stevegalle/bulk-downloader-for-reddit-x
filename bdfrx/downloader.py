@@ -101,6 +101,10 @@ class RedditDownloader(RedditConnector):
         ):
             logger.debug(f"Submission {submission.id} filtered due to score ratio ({submission.upvote_ratio})")
             return
+        # New filter: Skip if title contains "M4" (case-insensitive)
+        if "m4" in submission.title.lower():
+            logger.debug(f"Submission {submission.id} filtered due to title containing 'M4'")
+            return
         if not isinstance(submission, praw.models.Submission):
             logger.warning(f"{submission.id} is not a submission")
             return
