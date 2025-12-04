@@ -20,6 +20,7 @@ from bdfrx.site_downloaders.self_post import SelfPost
 from bdfrx.site_downloaders.vidble import Vidble
 from bdfrx.site_downloaders.vreddit import VReddit
 from bdfrx.site_downloaders.youtube import Youtube
+from bdfrx.site_downloaders.soundgasm import Soundgasm
 
 
 class DownloadFactory:
@@ -28,8 +29,7 @@ class DownloadFactory:
         if not url:
             raise NotADownloadableLinkError("No url provided by the reddit API")
         sanitised_url = DownloadFactory.sanitise_url(url).lower()
-        if re.match(r"soundgasm\.net", sanitised_url):
-            from bdfrx.site_downloaders.soundgasm import Soundgasm
+        if re.match(r"(www\.)?soundgasm\.net", sanitised_url):
             return Soundgasm
         if re.match(r"(i\.|m\.|o\.)?imgur", sanitised_url):
             return Imgur

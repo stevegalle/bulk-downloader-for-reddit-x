@@ -18,7 +18,7 @@ class Soundgasm(BaseDownloader):
     def find_resources(self, authenticator: Optional[SiteAuthenticator] = None) -> List[Resource]:
         """Extract all .m4a audio resources from the Soundgasm page, handling multiples."""
         resources = []
-
+        logger.info(f"*******Finding .m4a resources for {self.post.url}")
         # Fetch the page content
         try:
             response = self.retrieve_url(self.post.url)
