@@ -46,15 +46,21 @@ class SelfPost(BaseDownloader):
                     'title': self.post.title,
                     'subreddit': self.post.subreddit,
                     'author': self.post.author,
-                    'created_utc': self.post.created_utc
+                    'created_utc': self.post.created_utc,
+                    'fullname': self.post.fullname  # Added for better compatibility
                 })()
                 soundgasm_downloader = Soundgasm(mock_post)
                 audio_resources = soundgasm_downloader.find_resources(authenticator)
+
+                # Override source_submission to use the real post for naming
+                for res in audio_resources:
+                    res.source_submission = self.post  # Use original submission for formatting
+
                 resources.extend(audio_resources)
                 logger.debug(f"Extracted {len(audio_resources)} audio resources from {link}")
             except Exception as e:
                 logger.warning(f"Failed to extract audio from {link}: {e}")
-                raise SiteDownloaderError(f"Error processing soundgasm link {link}: {e}")
+                # Continue without raising to allow .txt to save
 
         if len(resources) == 1:  # Only text, no audio found
             logger.debug(f"No audio resources found for self-post {self.post.id}")
