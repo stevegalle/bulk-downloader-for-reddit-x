@@ -5,42 +5,37 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from bdfrx.site_downloaders.base_downloader import BaseDownloader
+from bdfrx.exceptions import SiteDownloaderError
 from bdfrx.resource import Resource
-from bdfrx.site_authenticator import SiteAuthenticator  # If auth is needed later
+from bdfrx.site_authenticator import SiteAuthenticator
+from bdfrx.site_downloaders.base_downloader import BaseDownloader
 
 logger = logging.getLogger(__name__)
 
 class Soundgasm(BaseDownloader):
     def __init__(self, post):
-        super().__init__(post, typical_extension=".m4a")  # Default to .m4a based on the page source
+        super().__init__(post, typical_extension=".m4a")
 
     def find_resources(self, authenticator: Optional[SiteAuthenticator] = None) -> List[Resource]:
-        """Extract all .m4a audio resources from the Soundgasm page, handling multiples."""
         resources = []
         logger.info(f"*******Finding .m4a resources for {self.post.url}")
-        # Fetch the page content
         try:
             response = self.retrieve_url(self.post.url)
             soup = BeautifulSoup(response.text, 'html.parser')
         except Exception as e:
             logger.error(f"Failed to fetch page for {self.post.url}: {e}")
-            raise ValueError(f"Could not retrieve content from {self.post.url}")
+            raise SiteDownloaderError(f"Could not retrieve content from {self.post.url}")
 
-        # Find all <script> tags and extract .m4a URLs from jPlayer setMedia calls
         script_tags = soup.find_all('script')
-        potential_urls = set()  # Use set to avoid duplicates
+        potential_urls = set()
         for script in script_tags:
-            if script.string:  # Check if script has content
-                # Regex to match m4a: "url" patterns (handles multiples)
+            if script.string:
                 matches = re.findall(r'm4a:\s*"([^"]+\.m4a)"', script.string, re.IGNORECASE)
                 for match in matches:
-                    audio_url = urljoin(self.post.url, match)  # Handle relative URLs
+                    audio_url = urljoin(self.post.url, match)
                     potential_urls.add(audio_url)
 
-        # Create Resources for each unique .m4a URL
         for audio_url in potential_urls:
-            # Optional: Validate URL with HEAD request
             try:
                 head_response = self.head_url(audio_url)
                 if head_response.status_code != 200:
@@ -50,18 +45,18 @@ class Soundgasm(BaseDownloader):
                 logger.warning(f"Could not verify {audio_url}: {e}")
                 continue
 
-            # Create Resource
+            # Corrected Resource creation to match init signature
             resource = Resource(
-                source=self.post,
+                source_submission=self.post,  # Matches 'source_submission'
                 url=audio_url,
-                download_function=Resource.http_download,  # Built-in HTTP downloader with retries
-                extension=".m4a",
-                hash_hex=""  # Hash computed post-download
+                download_function=Resource.http_download,
+                extension=".m4a"
             )
             resources.append(resource)
+            logger.debug(f"Created resource for {audio_url}")
 
         if not resources:
-            raise ValueError(f"No .m4a audio resources found for {self.post.url}")
+            raise SiteDownloaderError(f"No .m4a audio resources found for {self.post.url}")
 
         logger.debug(f"Found {len(resources)} .m4a resources for {self.post.url}")
         return resources
