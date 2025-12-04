@@ -45,11 +45,11 @@ class Soundgasm(BaseDownloader):
                 logger.warning(f"Could not verify {audio_url}: {e}")
                 continue
 
-            # Corrected Resource creation to match init signature
+            # Use retry_download to wrap http_download with the URL baked in
             resource = Resource(
                 source_submission=self.post,  # Matches 'source_submission'
                 url=audio_url,
-                download_function=Resource.http_download,
+                download_function=Resource.retry_download(audio_url),  # Wrapped for single-arg call
                 extension=".m4a"
             )
             resources.append(resource)
