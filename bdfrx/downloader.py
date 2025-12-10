@@ -46,16 +46,13 @@ class RedditDownloader(RedditConnector):
 
     def download(self) -> None:
         for generator in self.reddit_lists:
-            last_submission_id = None
             try:
                 for submission in generator:
                     try:
                         self._download_submission(submission)
                     except prawcore.PrawcoreException as e:
                         logger.error(f"Submission {submission.id} failed to download due to a PRAW exception: {e}")
-                    last_submission_id = submission.id
             except prawcore.PrawcoreException as e:
-
                 logger.error(f"The submission after {submission.id} failed to download due to a PRAW exception: {e}")
                 logger.debug("Waiting 60 seconds to continue")
                 sleep(60)
@@ -74,10 +71,10 @@ class RedditDownloader(RedditConnector):
                 logger.debug(f"Submission {submission.id} link exists in the DB, skipping")
                 return
         if submission.id in self.excluded_submission_ids:
-            logger.debug(f"Object {submission.id} in exclusion list, skipping")
+            logger.info(f"Object {submission.id} in exclusion list, skipping")
             return
         if submission.subreddit.display_name.lower() in self.args.skip_subreddit:
-            logger.debug(f"Submission {submission.id} in {submission.subreddit.display_name} in skip list")
+            logger.info(f"Submission {submission.id} in {submission.subreddit.display_name} in skip list")
             return
         if (submission.author and submission.author.name in self.args.ignore_user) or (
             submission.author is None and "DELETED" in self.args.ignore_user
@@ -105,8 +102,8 @@ class RedditDownloader(RedditConnector):
             logger.debug(f"Submission {submission.id} filtered due to score ratio ({submission.upvote_ratio})")
             return
         # New filter: Skip if title contains "M4" (case-insensitive)
-        if "m4" in submission.title.lower():
-            logger.debug(f"Submission {submission.id} filtered due to title containing 'M4'")
+        if "M4" in submission.title:
+            logger.info(f"Submission {submission.id} filtered due to title containing 'M4'")
             return
         if not isinstance(submission, praw.models.Submission):
             logger.warning(f"{submission.id} is not a submission")
@@ -122,6 +119,10 @@ class RedditDownloader(RedditConnector):
             logger.debug(f"Using {downloader_class.__name__} with url {submission.url}")
         except errors.NotADownloadableLinkError as e:
             logger.error(f"Could not download submission {submission.id}: {e}")
+            if self.args.db:
+                self.db.execute("INSERT OR IGNORE INTO link (link) values(?);", (submission.url,))
+                self.db.execute("INSERT OR IGNORE INTO post_id (post_id) values(?);", (submission.id,))
+                logger.debug(f"Marked failed submission {submission.id} (URL: {submission.url}) in DB to skip future attempts")
             return
         if downloader_class.__name__.lower() in self.args.disable_module:
             logger.debug(f"Submission {submission.id} skipped due to disabled module {downloader_class.__name__}")
@@ -130,6 +131,10 @@ class RedditDownloader(RedditConnector):
             content = downloader.find_resources(self.authenticator)
         except errors.SiteDownloaderError as e:
             logger.error(f"Site {downloader_class.__name__} failed to download submission {submission.id}: {e}")
+            if self.args.db:
+                self.db.execute("INSERT OR IGNORE INTO link (link) values(?);", (submission.url,))
+                self.db.execute("INSERT OR IGNORE INTO post_id (post_id) values(?);", (submission.id,))
+                logger.debug(f"Marked failed submission {submission.id} (URL: {submission.url}) in DB to skip future attempts")
             return
         for destination, res in self.file_name_formatter.format_resource_paths(content, self.download_directory):
             if destination.exists():
@@ -147,6 +152,10 @@ class RedditDownloader(RedditConnector):
                         f"with downloader {downloader_class.__name__}: {e}"
                     ),
                 )
+                if self.args.db:
+                    self.db.execute("INSERT OR IGNORE INTO link (link) values(?);", (submission.url,))
+                    self.db.execute("INSERT OR IGNORE INTO post_id (post_id) values(?);", (submission.id,))
+                    logger.debug(f"Marked failed submission {submission.id} (URL: {submission.url}) in DB to skip future attempts")
                 return
             resource_hash = res.hash.hexdigest()
             if self.args.db and (

@@ -17,6 +17,11 @@ class Soundgasm(BaseDownloader):
         super().__init__(post, typical_extension=".m4a")
 
     def find_resources(self, authenticator: Optional[SiteAuthenticator] = None) -> List[Resource]:
+        # Skip if title contains "M4" (case-sensitive)
+        if "M4" in self.post.title:
+            logger.info(f"Skipping submission {self.post.id} due to title containing 'M4'")
+            return []
+
         resources = []
         logger.info(f"*******Finding .m4a resources for {self.post.url}")
         try:
