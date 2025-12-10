@@ -9,7 +9,7 @@ from multiprocessing import Pool
 from pathlib import Path
 from time import sleep
 from typing import Union
-
+import re
 import praw
 import praw.exceptions
 import praw.models
@@ -102,7 +102,7 @@ class RedditDownloader(RedditConnector):
             logger.debug(f"Submission {submission.id} filtered due to score ratio ({submission.upvote_ratio})")
             return
         # New filter: Skip if title contains "M4" (case-insensitive)
-        if "M4" in submission.title:
+        if re.search(r'M4A|M4M', submission.title, re.IGNORECASE):
             logger.info(f"Submission {submission.id} filtered due to title containing 'M4'")
             return
         if not isinstance(submission, praw.models.Submission):
