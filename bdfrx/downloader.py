@@ -119,7 +119,7 @@ class RedditDownloader(RedditConnector):
             logger.debug(f"Using {downloader_class.__name__} with url {submission.url}")
         except errors.NotADownloadableLinkError as e:
             logger.error(f"Could not download submission {submission.id}: {e}")
-            if self.args.db:
+            if self.args.db and self.args.uredb:
                 self.db.execute("INSERT OR IGNORE INTO link (link) values(?);", (submission.url,))
                 self.db.execute("INSERT OR IGNORE INTO post_id (post_id) values(?);", (submission.id,))
                 logger.debug(f"Marked failed submission {submission.id} (URL: {submission.url}) in DB to skip future attempts")
@@ -131,7 +131,7 @@ class RedditDownloader(RedditConnector):
             content = downloader.find_resources(self.authenticator)
         except errors.SiteDownloaderError as e:
             logger.error(f"Site {downloader_class.__name__} failed to download submission {submission.id}: {e}")
-            if self.args.db:
+            if self.args.db and self.args.uredb:
                 self.db.execute("INSERT OR IGNORE INTO link (link) values(?);", (submission.url,))
                 self.db.execute("INSERT OR IGNORE INTO post_id (post_id) values(?);", (submission.id,))
                 logger.debug(f"Marked failed submission {submission.id} (URL: {submission.url}) in DB to skip future attempts")
@@ -152,7 +152,7 @@ class RedditDownloader(RedditConnector):
                         f"with downloader {downloader_class.__name__}: {e}"
                     ),
                 )
-                if self.args.db:
+                if self.args.db and self.args.uredb:
                     self.db.execute("INSERT OR IGNORE INTO link (link) values(?);", (submission.url,))
                     self.db.execute("INSERT OR IGNORE INTO post_id (post_id) values(?);", (submission.id,))
                     logger.debug(f"Marked failed submission {submission.id} (URL: {submission.url}) in DB to skip future attempts")

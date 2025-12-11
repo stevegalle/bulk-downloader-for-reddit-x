@@ -18,6 +18,7 @@ _common_options = [
     click.option("--authenticate", is_flag=True, default=None),
     click.option("--config", type=str, default=None),
     click.option("--db", is_flag=True, default=None),
+    click.option("--uredb", is_flag=True, default=None),
     click.option("--db-file", type=str, default=None),
     click.option("--disable-module", type=str, multiple=True, default=None),
     click.option("--downvoted", is_flag=True, default=None),

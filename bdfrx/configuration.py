@@ -15,6 +15,7 @@ class Configuration(Namespace):
         self.authenticate = False
         self.config = None
         self.db = False
+        self.uredb = False
         self.db_file: Optional[str] = None
         self.directory: str = "."
         self.disable_module: list[str] = []
