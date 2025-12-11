@@ -28,6 +28,7 @@ _common_options = [
     click.option("--filename-restriction-scheme", type=click.Choice(("linux", "windows")), default=None),
     click.option("--folder-scheme", type=str, default=None),
     click.option("--ignore-user", type=str, multiple=True, default=None),
+    click.option("--filter-gender", type=click.Choice(("male", "female")), default=None),
     click.option("--include-id-file", type=str, multiple=True, default=None),
     click.option("-L", "--limit", type=int, default=None),
     click.option("-l", "--link", type=str, multiple=True, default=None),
