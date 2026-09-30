@@ -52,6 +52,8 @@ class RedditDownloader(RedditConnector):
                         self._download_submission(submission)
                     except prawcore.PrawcoreException as e:
                         logger.error(f"Submission {submission.id} failed to download due to a PRAW exception: {e}")
+                    except Exception:  # noqa: BLE001 - one bad post shouldn't end the whole run
+                        logger.exception(f"Unexpected error downloading submission {submission.id}, skipping it")
                     if self.args.db:
                         # Commit per submission: holding one transaction for the whole run would lock every other
                         # process using this DB out until the run finished
@@ -137,6 +139,12 @@ class RedditDownloader(RedditConnector):
             return
         try:
             content = downloader.find_resources(self.authenticator)
+        except errors.TemporaryDownloadError as e:
+            logger.warning(
+                f"Site {downloader_class.__name__} unavailable for submission {submission.id}, "
+                f"will try again next run: {e}",
+            )
+            return
         except errors.SiteDownloaderError as e:
             logger.error(f"Site {downloader_class.__name__} failed to download submission {submission.id}: {e}")
             if self.args.db and self.args.uredb:
@@ -153,6 +161,12 @@ class RedditDownloader(RedditConnector):
                 continue
             try:
                 res.download({"max_wait_time": self.args.max_wait_time})
+            except errors.TemporaryDownloadError as e:
+                logger.warning(
+                    f"Could not download resource {res.url} in submission {submission.id} now, "
+                    f"will try again next run: {e}",
+                )
+                return
             except errors.BulkDownloaderException as e:
                 logger.error(
                     (

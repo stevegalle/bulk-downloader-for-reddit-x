@@ -1,7 +1,10 @@
-from unittest.mock import MagicMock
+from typing import Optional
+from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
+from bdfrx.exceptions import BulkDownloaderException, TemporaryDownloadError
 from bdfrx.resource import Resource
 
 
@@ -35,3 +38,75 @@ def test_download_online_resource(test_url: str, expected_hash: str):
     test_resource = Resource(MagicMock(), test_url, Resource.retry_download(test_url))
     test_resource.download()
     assert test_resource.hash.hexdigest() == expected_hash
+
+
+def _response(status: int, content: bytes = b"", headers: Optional[dict] = None) -> MagicMock:
+    response = MagicMock()
+    response.status_code = status
+    response.content = content
+    response.headers = headers or {}
+    return response
+
+
+@patch("bdfrx.resource.time.sleep")
+@patch("bdfrx.resource.requests.get")
+def test_http_download_retries_a_dropped_transfer(mock_get: MagicMock, mock_sleep: MagicMock):
+    mock_get.side_effect = [requests.exceptions.ChunkedEncodingError("Connection broken"), _response(200, b"video")]
+    assert Resource.http_download("https://example.com/a.mp4", {"max_wait_time": 30}) == b"video"
+    mock_sleep.assert_called_once_with(10)
+
+
+@pytest.mark.parametrize(
+    ("max_wait_time", "expected_waits"),
+    ((30, [10, 20]), (120, [10, 20, 40]), (5, [])),
+)
+@patch("bdfrx.resource.time.sleep")
+@patch("bdfrx.resource.requests.get")
+def test_http_download_gives_up_within_max_wait_time(
+    mock_get: MagicMock,
+    mock_sleep: MagicMock,
+    max_wait_time: int,
+    expected_waits: list[int],
+):
+    mock_get.side_effect = requests.exceptions.ReadTimeout("timed out")
+    with pytest.raises(TemporaryDownloadError, match=f"{len(expected_waits) + 1} attempt"):
+        Resource.http_download("https://example.com/a.mp4", {"max_wait_time": max_wait_time})
+    assert [c.args[0] for c in mock_sleep.call_args_list] == expected_waits
+
+
+@patch("bdfrx.resource.time.sleep")
+@patch("bdfrx.resource.requests.get")
+def test_http_download_honours_retry_after(mock_get: MagicMock, mock_sleep: MagicMock):
+    mock_get.side_effect = [_response(429, headers={"Retry-After": "25"}), _response(200, b"ok")]
+    assert Resource.http_download("https://example.com/a.jpg", {"max_wait_time": 30}) == b"ok"
+    mock_sleep.assert_called_once_with(25)
+    mock_get.side_effect = [_response(429, headers={"Retry-After": "600"})]
+    with pytest.raises(TemporaryDownloadError, match="HTTP 429"):
+        Resource.http_download("https://example.com/a.jpg", {"max_wait_time": 30})
+
+
+@pytest.mark.parametrize("status", (500, 502, 503))
+@patch("bdfrx.resource.time.sleep")
+@patch("bdfrx.resource.requests.get")
+def test_http_download_retries_server_errors(mock_get: MagicMock, mock_sleep: MagicMock, status: int):
+    mock_get.side_effect = [_response(status), _response(200, b"ok")]
+    assert Resource.http_download("https://example.com/a.jpg", {"max_wait_time": 30}) == b"ok"
+
+
+@patch("bdfrx.resource.time.sleep")
+@patch("bdfrx.resource.requests.get")
+def test_http_download_does_not_retry_not_found(mock_get: MagicMock, mock_sleep: MagicMock):
+    mock_get.return_value = _response(404)
+    with pytest.raises(BulkDownloaderException) as info:
+        Resource.http_download("https://example.com/a.jpg", {"max_wait_time": 30})
+    assert not isinstance(info.value, TemporaryDownloadError)
+    mock_sleep.assert_not_called()
+
+
+def test_download_turns_any_network_error_into_a_temporary_error():
+    def broken(_params: dict) -> bytes:
+        raise requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead")
+
+    resource = Resource(MagicMock(), "https://example.com/a.mp4", broken)
+    with pytest.raises(TemporaryDownloadError):
+        resource.download()

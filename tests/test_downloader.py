@@ -5,11 +5,13 @@ from unittest.mock import MagicMock, patch
 
 import praw.models
 import pytest
+import requests
 
 from bdfrx.__main__ import make_console_logging_handler
 from bdfrx.configuration import Configuration
 from bdfrx.connector import RedditConnector
 from bdfrx.downloader import RedditDownloader
+from bdfrx.exceptions import BulkDownloaderException, SiteDownloaderError, TemporaryDownloadError
 
 
 def add_console_handler():
@@ -99,6 +101,79 @@ def test_ignored_users(
         submission.author.name = author
     RedditDownloader._download_submission(downloader_mock, submission)
     assert mock_function.called == downloaded
+
+
+@pytest.mark.parametrize(
+    ("error", "marked_done"),
+    (
+        (TemporaryDownloadError("connection dropped"), False),
+        (BulkDownloaderException("HTTP Code 404"), True),
+    ),
+)
+@patch("bdfrx.site_downloaders.download_factory.DownloadFactory.pull_lever")
+def test_only_permanent_failures_are_marked_done(
+    mock_function: MagicMock,
+    error: Exception,
+    marked_done: bool,
+    downloader_mock: MagicMock,
+    tmp_path: Path,
+):
+    downloader_mock.args.db = True
+    downloader_mock.args.uredb = True
+    downloader_mock.excluded_submission_ids = set()
+    downloader_mock.db.execute.return_value.fetchone.return_value = None
+    resource = MagicMock()
+    resource.download.side_effect = error
+    downloader_mock.file_name_formatter.format_resource_paths.return_value = [(tmp_path / "x.mp4", resource)]
+    mock_function.return_value = MagicMock()
+    mock_function.return_value.__name__ = "test"
+    submission = MagicMock()
+    submission.id = "aaaaaa"
+    submission.__class__ = praw.models.Submission
+    RedditDownloader._download_submission(downloader_mock, submission)
+    inserts = [c for c in downloader_mock.db.execute.call_args_list if "INSERT" in c.args[0]]
+    assert bool(inserts) == marked_done
+
+
+@pytest.mark.parametrize(
+    ("error", "marked_done"),
+    ((TemporaryDownloadError("HTTP 429"), False), (SiteDownloaderError("no JSON"), True)),
+)
+@patch("bdfrx.site_downloaders.download_factory.DownloadFactory.pull_lever")
+def test_site_failures_marked_done_only_when_permanent(
+    mock_function: MagicMock,
+    error: Exception,
+    marked_done: bool,
+    downloader_mock: MagicMock,
+):
+    downloader_mock.args.db = True
+    downloader_mock.args.uredb = True
+    downloader_mock.excluded_submission_ids = set()
+    downloader_mock.db.execute.return_value.fetchone.return_value = None
+    mock_function.return_value = MagicMock()
+    mock_function.return_value.__name__ = "test"
+    mock_function.return_value.return_value.find_resources.side_effect = error
+    submission = MagicMock()
+    submission.id = "aaaaaa"
+    submission.__class__ = praw.models.Submission
+    RedditDownloader._download_submission(downloader_mock, submission)
+    inserts = [c for c in downloader_mock.db.execute.call_args_list if "INSERT" in c.args[0]]
+    assert bool(inserts) == marked_done
+
+
+def test_one_bad_submission_does_not_end_the_run(downloader_mock: MagicMock):
+    downloader_mock.args.db = False
+    seen = []
+
+    def download(submission: MagicMock) -> None:
+        seen.append(submission)
+        if len(seen) == 1:
+            raise requests.exceptions.ChunkedEncodingError("Connection broken")
+
+    downloader_mock._download_submission.side_effect = download
+    downloader_mock.reddit_lists = [[MagicMock(), MagicMock(), MagicMock()]]
+    RedditDownloader.download(downloader_mock)
+    assert len(seen) == 3
 
 
 def test_download_commits_after_each_submission(downloader_mock: MagicMock):

@@ -5,8 +5,8 @@ from typing import Optional
 import requests
 from praw.models import Submission
 
-from bdfrx.exceptions import ResourceNotFound, SiteDownloaderError
-from bdfrx.resource import Resource
+from bdfrx.exceptions import ResourceNotFound, SiteDownloaderError, TemporaryDownloadError
+from bdfrx.resource import TEMPORARY_STATUS_CODES, Resource
 from bdfrx.site_authenticator import SiteAuthenticator
 
 logger = logging.getLogger(__name__)
@@ -31,14 +31,12 @@ class BaseDownloader(ABC):
     ) -> requests.Response:
         try:
             res = requests.get(url, cookies=cookies, headers=headers, timeout=16)
-        except requests.exceptions.RequestException as e:
-            logger.exception(e)
-            raise SiteDownloaderError(f"Failed to get page {url}")
-        except TimeoutError as e:
-            logger.exception(e)
-            raise SiteDownloaderError(f"Timeout reached attempting to get page {url}")
+        except (requests.exceptions.RequestException, TimeoutError) as e:
+            raise TemporaryDownloadError(f"Failed to get page {url}: {e}")
         if res.status_code != 200:
             url = initial or url
+            if res.status_code in TEMPORARY_STATUS_CODES:
+                raise TemporaryDownloadError(f"Server responded with {res.status_code} at {url}")
             raise ResourceNotFound(f"Server responded with {res.status_code} at {url}")
         return res
 
