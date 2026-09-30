@@ -436,6 +436,14 @@ def test_split_subreddit_entries(test_subreddit_entries: list[str], expected: se
     assert results == expected
 
 
+def test_read_ignored_users(tmp_path: Path):
+    test_file = tmp_path / "ignored.txt"
+    test_file.write_text("# people to skip\nAlice\n\n  bob  \nDELETED\n")
+    results = RedditConnector.read_ignored_users(["Carol", "alice"], [str(test_file)])
+    assert results == {"alice", "bob", "carol", "deleted"}
+    assert RedditConnector.read_ignored_users([], []) == set()
+
+
 def test_read_submission_ids_from_file(tmp_path: Path):
     test_file = tmp_path / "test.txt"
     test_file.write_text("aaaaaa\nbbbbbb")

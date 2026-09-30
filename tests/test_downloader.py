@@ -67,6 +67,40 @@ def test_excluded_ids(
     assert mock_function.call_count == expected_len
 
 
+@pytest.mark.parametrize(
+    ("author", "ignored", "downloaded"),
+    (
+        ("Alice", set(), True),
+        ("Alice", {"alice"}, False),
+        ("ALICE", {"alice"}, False),
+        ("bob", {"alice"}, True),
+        (None, {"deleted"}, False),
+        (None, {"alice"}, True),
+    ),
+)
+@patch("bdfrx.site_downloaders.download_factory.DownloadFactory.pull_lever")
+def test_ignored_users(
+    mock_function: MagicMock,
+    author: str,
+    ignored: set[str],
+    downloaded: bool,
+    downloader_mock: MagicMock,
+):
+    downloader_mock.excluded_submission_ids = set()
+    downloader_mock.args.ignore_user = ignored
+    mock_function.return_value = MagicMock()
+    mock_function.return_value.__name__ = "test"
+    submission = MagicMock()
+    submission.id = "aaaaaa"
+    submission.__class__ = praw.models.Submission
+    if author is None:
+        submission.author = None
+    else:
+        submission.author.name = author
+    RedditDownloader._download_submission(downloader_mock, submission)
+    assert mock_function.called == downloaded
+
+
 @pytest.mark.online
 @pytest.mark.reddit
 @pytest.mark.parametrize("test_submission_id", ("m1hqw6",))

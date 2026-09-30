@@ -27,6 +27,7 @@ class Configuration(Namespace):
         self.filter_gender = None
         self.folder_scheme: str = "{SUBREDDIT}"
         self.ignore_user = []
+        self.ignore_user_file = []
         self.include_id_file = []
         self.limit: Optional[int] = None
         self.link: list[str] = []

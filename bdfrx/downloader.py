@@ -76,13 +76,12 @@ class RedditDownloader(RedditConnector):
         if submission.subreddit.display_name.lower() in self.args.skip_subreddit:
             logger.info(f"Submission {submission.id} in {submission.subreddit.display_name} in skip list")
             return
-        if (submission.author and submission.author.name in self.args.ignore_user) or (
-            submission.author is None and "DELETED" in self.args.ignore_user
-        ):
+        author_name = submission.author.name if submission.author else "DELETED"
+        if author_name.lower() in self.args.ignore_user:
             logger.debug(
                 (
                     f"Submission {submission.id} in {submission.subreddit.display_name} skipped"
-                    f" due to {submission.author.name if submission.author else 'DELETED'} being an ignored user"
+                    f" due to {author_name} being an ignored user"
                 ),
             )
             return

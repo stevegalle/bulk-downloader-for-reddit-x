@@ -84,6 +84,7 @@ class RedditConnector(metaclass=ABCMeta):
             self.read_id_files(self.args.exclude_id_file),
             set(self.args.exclude_id),
         )
+        self.args.ignore_user = self.read_ignored_users(self.args.ignore_user, self.args.ignore_user_file)
 
         self.args.link = list(itertools.chain(self.args.link, self.read_id_files(self.args.include_id_file)))
 
@@ -492,6 +493,19 @@ class RedditConnector(metaclass=ABCMeta):
             raise errors.BulkDownloaderException(f"Source {subreddit.display_name} does not exist")
         except prawcore.Forbidden:
             raise errors.BulkDownloaderException(f"Source {subreddit.display_name} is private and cannot be scraped")
+
+    @staticmethod
+    def read_ignored_users(names: Iterable[str], file_locations: list[str]) -> set[str]:
+        """Ignored users from --ignore-user and --ignore-user-file, lowercased since Reddit names ignore case.
+
+        Files have one name per line; blank lines and lines starting with # are skipped.
+        """
+        from_files = RedditConnector.read_id_files(file_locations)
+        return {
+            name.lower()
+            for name in itertools.chain(names, from_files)
+            if name and not name.startswith("#")
+        }
 
     @staticmethod
     def read_id_files(file_locations: list[str]) -> set[str]:

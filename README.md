@@ -162,6 +162,11 @@ In cases when the same option is specified both in the YAML file and in as a com
 - `--ignore-user`
     - This will add a user to ignore
     - Can be specified multiple times
+    - Matching ignores case; `DELETED` ignores posts whose author has been deleted
+- `--ignore-user-file`
+    - This will ignore every user named in the files provided
+    - Can be specified multiple times
+    - Format is one username per line; blank lines and lines starting with `#` are skipped
 - `--include-id-file`
     - This will add any submission with the IDs in the files provided
     - Can be specified multiple times
