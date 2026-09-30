@@ -10,6 +10,7 @@ from bdfrx import __version__
 from bdfrx.completion import Completion
 from bdfrx.configuration import Configuration
 from bdfrx.downloader import RedditDownloader
+from bdfrx.exceptions import RATE_LIMITED_EXIT_CODE, RateLimitedError
 
 logger = logging.getLogger()
 
@@ -119,6 +120,10 @@ def cli_download(context: click.Context, **_) -> None:
     try:
         reddit_downloader = RedditDownloader(config, [stream])
         reddit_downloader.download()
+    except RateLimitedError as e:
+        # A distinct exit code, so whatever runs bdfrx can retry later
+        logger.error(f"{e}; the rest of this run's posts will be tried again next run")
+        sys.exit(RATE_LIMITED_EXIT_CODE)
     except Exception:
         logger.exception(f"Downloader exited unexpectedly - BDFRx Downloader v{__version__}")
         raise

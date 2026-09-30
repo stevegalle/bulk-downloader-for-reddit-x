@@ -1,4 +1,5 @@
 import logging
+import urllib.parse
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -36,7 +37,10 @@ class BaseDownloader(ABC):
         if res.status_code != 200:
             url = initial or url
             if res.status_code in TEMPORARY_STATUS_CODES:
-                raise TemporaryDownloadError(f"Server responded with {res.status_code} at {url}")
+                raise TemporaryDownloadError(
+                    f"Server responded with {res.status_code} at {url}",
+                    rate_limited_host=urllib.parse.urlsplit(url).hostname if res.status_code == 429 else None,
+                )
             raise ResourceNotFound(f"Server responded with {res.status_code} at {url}")
         return res
 

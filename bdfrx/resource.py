@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 FIRST_RETRY_WAIT = 10
+MAX_ATTEMPTS = 4
 # Responses meaning "not now" rather than "not there": timeouts, rate limiting, and server trouble
 TEMPORARY_STATUS_CODES = frozenset((408, 425, 429, 500, 502, 503, 504))
 
@@ -73,8 +74,9 @@ class Resource:
     def http_download(url: str, download_parameters: dict) -> Optional[bytes]:
         """Download a URL, retrying network failures, rate limiting and server errors.
 
-        Waits 10, 20, 40... seconds between attempts (or what a Retry-After header asks for) while the total stays
-        within max_wait_time, then raises TemporaryDownloadError so the post is tried again on a later run.
+        Waits 10, 20, 40... seconds between attempts (longer if a Retry-After header asks for it), for at most
+        MAX_ATTEMPTS attempts and while the total stays within max_wait_time, then raises TemporaryDownloadError so
+        the post is tried again on a later run.
         Other HTTP errors (e.g. 404) raise BulkDownloaderException at once.
         """
         headers = download_parameters.get("headers")
@@ -85,6 +87,7 @@ class Resource:
         while True:
             attempt += 1
             retry_after = None
+            status = None
             try:
                 response = requests.get(url, headers=headers, timeout=16)
             except requests.exceptions.RequestException as e:
@@ -96,12 +99,15 @@ class Resource:
                     raise BulkDownloaderException(
                         f"Unrecoverable error requesting resource: HTTP Code {response.status_code}",
                     )
-                problem = f"HTTP {response.status_code}"
+                status = response.status_code
+                problem = f"HTTP {status}"
                 retry_after = Resource._retry_after(response)
-            wait = retry_after if retry_after is not None else next_wait
-            if waited + wait > max_wait_time:
+            # Never less than the backoff: some hosts send "Retry-After: 0" while still refusing
+            wait = max(retry_after or 0, next_wait)
+            if attempt >= MAX_ATTEMPTS or waited + wait > max_wait_time:
                 raise TemporaryDownloadError(
                     f"Gave up on {url} after {attempt} attempt(s) and {waited}s of waiting: {problem}",
+                    rate_limited_host=urllib.parse.urlsplit(url).hostname if status == 429 else None,
                 )
             logger.warning(f"Error downloading {url} (attempt {attempt}), retrying in {wait} seconds: {problem}")
             time.sleep(wait)

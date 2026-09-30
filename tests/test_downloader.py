@@ -11,7 +11,7 @@ from bdfrx.__main__ import make_console_logging_handler
 from bdfrx.configuration import Configuration
 from bdfrx.connector import RedditConnector
 from bdfrx.downloader import RedditDownloader
-from bdfrx.exceptions import BulkDownloaderException, SiteDownloaderError, TemporaryDownloadError
+from bdfrx.exceptions import BulkDownloaderException, RateLimitedError, SiteDownloaderError, TemporaryDownloadError
 
 
 def add_console_handler():
@@ -174,6 +174,32 @@ def test_one_bad_submission_does_not_end_the_run(downloader_mock: MagicMock):
     downloader_mock.reddit_lists = [[MagicMock(), MagicMock(), MagicMock()]]
     RedditDownloader.download(downloader_mock)
     assert len(seen) == 3
+
+
+def test_a_host_refusing_several_files_in_a_row_stops_the_run(downloader_mock: MagicMock):
+    downloader_mock.rate_limit_strikes = {}
+    limited = TemporaryDownloadError("HTTP 429", rate_limited_host="i.imgur.com")
+    RedditDownloader._count_rate_limit(downloader_mock, limited)
+    RedditDownloader._count_rate_limit(downloader_mock, TemporaryDownloadError("timed out"))  # not a rate limit
+    RedditDownloader._count_rate_limit(downloader_mock, TemporaryDownloadError("HTTP 429", rate_limited_host="other.com"))
+    RedditDownloader._count_rate_limit(downloader_mock, limited)
+    with pytest.raises(RateLimitedError, match="i.imgur.com"):
+        RedditDownloader._count_rate_limit(downloader_mock, limited)
+
+
+def test_rate_limit_stops_the_run_instead_of_being_skipped(downloader_mock: MagicMock):
+    downloader_mock.args.db = False
+    seen = []
+
+    def download(submission: MagicMock) -> None:
+        seen.append(submission)
+        raise RateLimitedError("i.imgur.com")
+
+    downloader_mock._download_submission.side_effect = download
+    downloader_mock.reddit_lists = [[MagicMock(), MagicMock()]]
+    with pytest.raises(RateLimitedError):
+        RedditDownloader.download(downloader_mock)
+    assert len(seen) == 1
 
 
 def test_download_commits_after_each_submission(downloader_mock: MagicMock):

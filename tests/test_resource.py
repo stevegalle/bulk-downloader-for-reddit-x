@@ -110,3 +110,24 @@ def test_download_turns_any_network_error_into_a_temporary_error():
     resource = Resource(MagicMock(), "https://example.com/a.mp4", broken)
     with pytest.raises(TemporaryDownloadError):
         resource.download()
+
+
+@patch("bdfrx.resource.time.sleep")
+@patch("bdfrx.resource.requests.get")
+def test_http_download_never_retries_without_waiting(mock_get: MagicMock, mock_sleep: MagicMock):
+    # Some hosts answer 429 with "Retry-After: 0" for as long as they're blocking you
+    mock_get.return_value = _response(429, headers={"Retry-After": "0"})
+    with pytest.raises(TemporaryDownloadError) as info:
+        Resource.http_download("https://i.imgur.com/abc.mp4", {"max_wait_time": 300})
+    assert [c.args[0] for c in mock_sleep.call_args_list] == [10, 20, 40]
+    assert mock_get.call_count == 4
+    assert info.value.rate_limited_host == "i.imgur.com"
+
+
+@patch("bdfrx.resource.time.sleep")
+@patch("bdfrx.resource.requests.get")
+def test_only_429_marks_a_host_rate_limited(mock_get: MagicMock, mock_sleep: MagicMock):
+    mock_get.return_value = _response(503)
+    with pytest.raises(TemporaryDownloadError) as info:
+        Resource.http_download("https://example.com/a.jpg", {"max_wait_time": 30})
+    assert info.value.rate_limited_host is None

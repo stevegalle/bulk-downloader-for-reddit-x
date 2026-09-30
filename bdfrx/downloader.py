@@ -3,6 +3,7 @@ import logging.handlers
 import os
 import sqlite3
 import time
+import urllib.parse
 from collections.abc import Iterable
 from datetime import datetime
 from multiprocessing import Pool
@@ -22,6 +23,9 @@ from bdfrx.site_downloaders.download_factory import DownloadFactory
 
 logger = logging.getLogger(__name__)
 
+# Files in a row a host may refuse with HTTP 429 before the run stops
+RATE_LIMIT_STRIKES = 3
+
 
 def _calc_hash(existing_file: Path) -> tuple[Path, str]:
     chunk_size = 1024 * 1024
@@ -38,6 +42,7 @@ def _calc_hash(existing_file: Path) -> tuple[Path, str]:
 class RedditDownloader(RedditConnector):
     def __init__(self, args: Configuration, logging_handlers: Iterable[logging.Handler] = ()) -> None:
         super().__init__(args, logging_handlers)
+        self.rate_limit_strikes: dict[str, int] = {}
         if self.args.search_existing:
             if self.args.db:
                 self.scan_existing_files(self.download_directory, db=self.db)
@@ -52,6 +57,8 @@ class RedditDownloader(RedditConnector):
                         self._download_submission(submission)
                     except prawcore.PrawcoreException as e:
                         logger.error(f"Submission {submission.id} failed to download due to a PRAW exception: {e}")
+                    except errors.RateLimitedError:
+                        raise
                     except Exception:  # noqa: BLE001 - one bad post shouldn't end the whole run
                         logger.exception(f"Unexpected error downloading submission {submission.id}, skipping it")
                     if self.args.db:
@@ -67,6 +74,15 @@ class RedditDownloader(RedditConnector):
         if self.args.db:
             self.db.commit()
             self.db.close()
+
+    def _count_rate_limit(self, error: errors.TemporaryDownloadError) -> None:
+        """Stop the run once the same host has refused several files in a row with HTTP 429"""
+        host = error.rate_limited_host
+        if not host:
+            return
+        self.rate_limit_strikes[host] = self.rate_limit_strikes.get(host, 0) + 1
+        if self.rate_limit_strikes[host] >= RATE_LIMIT_STRIKES:
+            raise errors.RateLimitedError(host)
 
     def _download_submission(self, submission: praw.models.Submission) -> None:  # noqa: PLR0911,PLR0912,PLR0915
         if self.args.db:
@@ -144,6 +160,7 @@ class RedditDownloader(RedditConnector):
                 f"Site {downloader_class.__name__} unavailable for submission {submission.id}, "
                 f"will try again next run: {e}",
             )
+            self._count_rate_limit(e)
             return
         except errors.SiteDownloaderError as e:
             logger.error(f"Site {downloader_class.__name__} failed to download submission {submission.id}: {e}")
@@ -166,6 +183,7 @@ class RedditDownloader(RedditConnector):
                     f"Could not download resource {res.url} in submission {submission.id} now, "
                     f"will try again next run: {e}",
                 )
+                self._count_rate_limit(e)
                 return
             except errors.BulkDownloaderException as e:
                 logger.error(
@@ -179,6 +197,7 @@ class RedditDownloader(RedditConnector):
                     self.db.execute("INSERT OR IGNORE INTO post_id (post_id) values(?);", (submission.id,))
                     logger.debug(f"Marked failed submission {submission.id} (URL: {submission.url}) in DB to skip future attempts")
                 return
+            self.rate_limit_strikes.pop(urllib.parse.urlsplit(res.url).hostname or "", None)  # it got through
             resource_hash = res.hash.hexdigest()
             if self.args.db and (
                 hard_link := self.db.execute("SELECT path FROM hash WHERE hash=?;", (resource_hash,)).fetchone()
