@@ -1,3 +1,5 @@
+import sqlite3
+import threading
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -434,6 +436,33 @@ def test_sanitise_subreddit_name(test_name: str, expected: str):
 def test_split_subreddit_entries(test_subreddit_entries: list[str], expected: set[str]):
     results = RedditConnector.split_args_input(test_subreddit_entries)
     assert results == expected
+
+
+def test_connect_db_waits_for_other_writers(tmp_path: Path):
+    db_path = tmp_path / "history.db"
+    writer = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
+    writer.execute("CREATE TABLE post_id (post_id TEXT UNIQUE);")
+    writer.execute("BEGIN IMMEDIATE;")
+    writer.execute("INSERT INTO post_id VALUES ('aaaaaa');")
+    releaser = threading.Timer(1.0, lambda: writer.execute("COMMIT;"))
+    releaser.start()
+    try:
+        other = RedditConnector.connect_db(db_path)
+        other.execute("INSERT INTO post_id VALUES ('bbbbbb');")  # blocks until the first writer commits
+        other.commit()
+    finally:
+        releaser.join()
+    assert {row[0] for row in other.execute("SELECT post_id FROM post_id;")} == {"aaaaaa", "bbbbbb"}
+
+
+def test_load_db_creates_missing_folders(tmp_path: Path):
+    connector = MagicMock()
+    connector.args.db_file = str(tmp_path / "users" / "nested" / "alice.db")
+    connector.connect_db = RedditConnector.connect_db
+    RedditConnector.load_db(connector)
+    assert (tmp_path / "users" / "nested" / "alice.db").exists()
+    tables = {row[0] for row in connector.db.execute("SELECT name FROM sqlite_master WHERE type = 'table';")}
+    assert {"hash", "post_id", "link"} <= tables
 
 
 def test_read_ignored_users(tmp_path: Path):

@@ -101,6 +101,18 @@ def test_ignored_users(
     assert mock_function.called == downloaded
 
 
+def test_download_commits_after_each_submission(downloader_mock: MagicMock):
+    downloader_mock.args.db = True
+    commits_before_each_download = []
+    downloader_mock._download_submission.side_effect = lambda _: commits_before_each_download.append(
+        downloader_mock.db.commit.call_count,
+    )
+    downloader_mock.reddit_lists = [[MagicMock(), MagicMock(), MagicMock()]]
+    RedditDownloader.download(downloader_mock)
+    assert commits_before_each_download == [0, 1, 2]
+    downloader_mock.db.close.assert_called_once()
+
+
 @pytest.mark.online
 @pytest.mark.reddit
 @pytest.mark.parametrize("test_submission_id", ("m1hqw6",))

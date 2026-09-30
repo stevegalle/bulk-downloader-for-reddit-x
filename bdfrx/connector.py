@@ -31,6 +31,9 @@ from bdfrx.site_authenticator import SiteAuthenticator
 
 logger = logging.getLogger(__name__)
 
+# Seconds to wait for another process's write to the history DB before giving up
+DB_LOCK_TIMEOUT = 60
+
 
 class RedditTypes:
     class SortType(Enum):
@@ -224,16 +227,22 @@ class RedditConnector(metaclass=ABCMeta):
             raise errors.BulkDownloaderException("Could not find a configuration file to load")
         self.cfg_parser.read(self.config_location)
 
+    @staticmethod
+    def connect_db(path: Union[str, Path]) -> sqlite3.Connection:
+        """Open a history DB, waiting up to DB_LOCK_TIMEOUT seconds for other bdfrx processes writing to it"""
+        return sqlite3.connect(path, timeout=DB_LOCK_TIMEOUT)
+
     def load_db(self) -> None:
         if self.args.db_file:
             if (db_path := Path(self.args.db_file)).exists():
                 logger.debug(f"Loading DB from {self.args.db_file}")
-                self.db = sqlite3.connect(db_path)
+                self.db = self.connect_db(db_path)
                 return
             with importlib.resources.path("bdfrx", "bdfrx.db") as path:
                 logger.info(f"DB not found at {self.args.db_file} loading clean DB")
-                shutil.copy(path, Path(self.args.db_file))
-                self.db = sqlite3.connect(self.args.db_file)
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(path, db_path)
+                self.db = self.connect_db(db_path)
                 return
         possible_paths = [
             Path("./bdfrx.db"),
@@ -243,14 +252,14 @@ class RedditConnector(metaclass=ABCMeta):
         for path in possible_paths:
             if path.resolve().expanduser().exists():
                 logger.debug(f"Loading DB from {path}")
-                self.db = sqlite3.connect(path)
+                self.db = self.connect_db(path)
                 break
         if not self.db:
             with importlib.resources.path("bdfrx", "bdfrx.db") as path:
                 db_path = Path(self.config_directory, "bdfrx.db")
                 logger.info(f"No DB found, loading clean DB to {db_path}")
                 shutil.copy(path, Path(self.config_directory, "bdfrx.db"))
-                self.db = sqlite3.connect(db_path)
+                self.db = self.connect_db(db_path)
 
     def create_file_logger(self) -> logging.handlers.RotatingFileHandler:
         if self.args.log is None:

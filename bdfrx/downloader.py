@@ -52,6 +52,10 @@ class RedditDownloader(RedditConnector):
                         self._download_submission(submission)
                     except prawcore.PrawcoreException as e:
                         logger.error(f"Submission {submission.id} failed to download due to a PRAW exception: {e}")
+                    if self.args.db:
+                        # Commit per submission: holding one transaction for the whole run would lock every other
+                        # process using this DB out until the run finished
+                        self.db.commit()
             except prawcore.PrawcoreException as e:
                 logger.error(f"The submission after {submission.id} failed to download due to a PRAW exception: {e}")
                 logger.debug("Waiting 60 seconds to continue")
