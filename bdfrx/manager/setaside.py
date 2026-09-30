@@ -102,6 +102,10 @@ def set_aside(conn: sqlite3.Connection, name: str, *, dry_run: bool = False) -> 
             )
         conn.commit()  # per file, so an interruption never leaves the record behind the filesystem
         moved += 1
+    if not dry_run:
+        # Their own users/<name> folder is emptied by the move; subreddit folders are shared and stay
+        for user_dir in {source.parent for post_id, source, _ in moves if post_id is None}:
+            runner.remove_empty_dirs(user_dir)
     return {"moved": moved, "skipped": skipped}
 
 

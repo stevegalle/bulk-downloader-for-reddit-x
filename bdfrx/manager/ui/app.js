@@ -301,9 +301,14 @@ function candidateCard(candidate) {
 
 const ACTIONS = {
   follow: {
-    run: (name) => api(`/candidates/${encodeURIComponent(name)}/promote`, { method: "POST" }),
+    run: async (name) => {
+      const result = await api(`/candidates/${encodeURIComponent(name)}/promote?download=true`, { method: "POST" });
+      if (result.download) watchDownloads();
+      return result;
+    },
+    // Removing the source also drops its download if it hasn't started (the worker re-checks before starting)
     undo: (name) => api(`/sources/user/${encodeURIComponent(name)}`, { method: "DELETE" }),
-    message: (name) => `Following u/${name}`,
+    message: (name, result) => (result && result.download ? `Following u/${name} · downloading their posts` : `Following u/${name}`),
   },
   dismiss: {
     run: (name) => api(`/candidates/${encodeURIComponent(name)}/dismissed`, { method: "PUT" }),
@@ -385,6 +390,48 @@ async function act(card, action) {
       candidates.offset += 1;
     },
   });
+}
+
+// Background downloads (started by following someone): a status pill while any are queued or running
+
+let downloadTimer = null;
+let lastReported = null;
+
+function describeJob(job) {
+  return `${job.kind === "user" ? "u/" : "r/"}${job.name}`;
+}
+
+async function watchDownloads() {
+  clearTimeout(downloadTimer);
+  let state;
+  try {
+    state = await api("/downloads");
+  } catch {
+    downloadTimer = setTimeout(watchDownloads, 10000);
+    return;
+  }
+  const pill = $("#activity");
+  const busy = state.current || state.pending.length;
+  if (busy) {
+    const now = state.current ? `Downloading ${describeJob(state.current)}` : "Starting downloads";
+    const waiting = state.pending.length ? ` · ${state.pending.length} queued` : "";
+    pill.textContent = now + waiting;
+    pill.title = [state.current, ...state.pending].filter(Boolean).map(describeJob).join(", ");
+    pill.hidden = false;
+  } else {
+    pill.hidden = true;
+  }
+  // Report each finished download once
+  const last = state.last;
+  const key = last && `${last.kind}/${last.name}/${last.run_id ?? last.reason}`;
+  if (last && lastReported !== null && key !== lastReported) {
+    if (last.status === "ok") toast(`${describeJob(last)}: ${number(last.files_new)} new file${last.files_new === 1 ? "" : "s"}`);
+    else if (last.status === "deactivated") toast(`${describeJob(last)} deactivated: ${last.reason}`, { error: true });
+    else if (last.status === "skipped") toast(`${describeJob(last)}: download skipped (${last.reason})`);
+    else toast(`${describeJob(last)}: download failed${last.reason ? ` (${last.reason})` : ""}. See the run's log.`, { error: true });
+  }
+  lastReported = key ?? lastReported ?? "";
+  if (busy) downloadTimer = setTimeout(watchDownloads, 4000);
 }
 
 // Previews
@@ -534,5 +581,6 @@ function setUpKeyDialog() {
 
 setUpKeyDialog();
 setUpViewer();
+watchDownloads(); // picks up downloads already running, e.g. started from another device
 window.addEventListener("hashchange", route);
 route();

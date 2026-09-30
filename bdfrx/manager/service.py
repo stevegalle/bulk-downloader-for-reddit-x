@@ -26,11 +26,12 @@ DEFAULT_SETTINGS = {
     "default_sort": "new",
     "default_time": "day",
     "default_filter_gender": "male",
-    "history_db_user": "~/.config/bdfrx/userdb/userdb",
+    "history_db_user": "~/.config/bdfrx/userdbs/{name}.db",
     "history_db_subreddit": "",
     "log_dir": "",
     "run_timeout": "3600",
     "ignored_folder": "ignored",
+    "follow_download_time": "all",
 }
 
 SETTING_HELP = {
@@ -44,11 +45,12 @@ SETTING_HELP = {
     "default_sort": f"Sort used when a source has none: {', '.join(SORTS)}",
     "default_time": f"Time filter used when a source has none: {', '.join(TIMES)}",
     "default_filter_gender": f"Gender filter used when a source has none: {', '.join(GENDERS)}",
-    "history_db_user": "bdfrx --db-file for user sources; empty uses bdfrx's default DB",
-    "history_db_subreddit": "bdfrx --db-file for subreddit sources; empty uses bdfrx's default DB",
+    "history_db_user": "bdfrx --db-file for user sources; {name} gives each its own DB; empty uses bdfrx's default",
+    "history_db_subreddit": "bdfrx --db-file for subreddit sources; {name} gives each its own DB; empty: bdfrx default",
     "log_dir": "Where per-run logs and the lock file go; empty means <config dir>/manager",
     "run_timeout": "Seconds before a single bdfrx invocation is killed",
     "ignored_folder": "Folder, beside users/ and subreddits/ in the archive, that set-aside files are moved into",
+    "follow_download_time": f"Time filter for the download started when you follow a candidate: {', '.join(TIMES)}",
 }
 
 
@@ -137,7 +139,12 @@ def set_setting(conn: sqlite3.Connection, key: str, value: Optional[str]) -> Non
     """Set a setting; None restores the default"""
     if key not in DEFAULT_SETTINGS:
         raise ManagerError(f"Unknown setting {key!r}; expected one of {', '.join(DEFAULT_SETTINGS)}")
-    choices = {"default_sort": SORTS, "default_time": TIMES, "default_filter_gender": GENDERS}
+    choices = {
+        "default_sort": SORTS,
+        "default_time": TIMES,
+        "default_filter_gender": GENDERS,
+        "follow_download_time": TIMES,
+    }
     if key in choices:
         _check_choice(key, value, choices[key])
     if key == "run_timeout" and value is not None and not value.isdigit():

@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,6 +65,14 @@ def destination(settings: dict[str, str], source: dict) -> Path:
     return Path(settings["dest_root"]).expanduser() / f"{source['kind']}s" / source["name"]
 
 
+def history_db_path(settings: dict[str, str], source: dict) -> Optional[Path]:
+    """The source's bdfrx history DB; {name} in the setting becomes the source's name (one DB per source)"""
+    pattern = settings[f"history_db_{source['kind']}"]
+    if not pattern:
+        return None
+    return Path(pattern.replace("{name}", source["name"])).expanduser()
+
+
 def download_directory(settings: dict[str, str], source: dict) -> Path:
     if settings["staging_root"]:
         return Path(settings["staging_root"]).expanduser() / f"{source['kind']}s" / source["name"]
@@ -83,9 +92,23 @@ def rule_files(directory: Path, rules: dict[str, list[str]]) -> dict[str, Path]:
 
 
 def write_rule_files(files: dict[str, Path], rules: dict[str, list[str]]) -> None:
+    """Write rule files atomically, since a run in another thread or process may be reading them"""
     for kind, path in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(rules[kind]) + "\n")
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
+        temporary.write_text("\n".join(rules[kind]) + "\n")
+        temporary.replace(path)
+
+
+def default_bdfrx_command() -> list[str]:
+    """The bdfrx installed alongside this Python.
+
+    Its console script is preferred over 'python -m bdfrx', which puts the current directory first on the import
+    path: started from a directory containing a folder named bdfrx (such as a venv at ~/bdfrx), it imports that
+    folder instead of the package and fails.
+    """
+    script = Path(sys.executable).parent / "bdfrx"
+    return [str(script)] if script.is_file() else [sys.executable, "-m", "bdfrx"]
 
 
 def build_command(  # noqa: PLR0912
@@ -94,12 +117,13 @@ def build_command(  # noqa: PLR0912
     rules: dict[str, list[str]],
     files: Optional[dict[str, Path]] = None,
     sort_override: Optional[str] = None,
+    time_override: Optional[str] = None,
 ) -> list[str]:
     """The bdfrx command for a source. Rules in files are passed by file; without a file, ignored users are
     passed one by one and excluded posts are left out."""
     files = files or {}
     opts = effective_options(settings, source)
-    cmd = shlex.split(settings["bdfrx_command"]) if settings["bdfrx_command"] else [sys.executable, "-m", "bdfrx"]
+    cmd = shlex.split(settings["bdfrx_command"]) if settings["bdfrx_command"] else default_bdfrx_command()
     cmd += ["download", str(download_directory(settings, source))]
 
     if source["kind"] == "user":
@@ -107,7 +131,7 @@ def build_command(  # noqa: PLR0912
     else:
         cmd += ["--subreddit", source["name"]]
 
-    cmd += ["--sort", sort_override or opts["sort"], "--time", opts["time"]]
+    cmd += ["--sort", sort_override or opts["sort"], "--time", time_override or opts["time"]]
     cmd += ["--file-scheme", settings["file_scheme"], "--folder-scheme", settings["folder_scheme"]]
     if settings["authenticate"].lower() in ("1", "true", "yes"):
         cmd.append("--authenticate")
@@ -115,8 +139,8 @@ def build_command(  # noqa: PLR0912
         cmd += ["--config", str(Path(settings["bdfrx_config"]).expanduser())]
 
     cmd += ["--db", "--uredb"]
-    if history_db := settings[f"history_db_{source['kind']}"]:
-        cmd += ["--db-file", str(Path(history_db).expanduser())]
+    if history_db := history_db_path(settings, source):
+        cmd += ["--db-file", str(history_db)]
 
     if opts["filter_gender"] != "none":
         cmd += ["--filter-gender", opts["filter_gender"]]
@@ -178,6 +202,17 @@ def move_staged(staging: Path, dest: Path) -> tuple[int, int]:
     return moved, skipped
 
 
+def remove_empty_dirs(directory: Path) -> None:
+    """Remove the directory and any directories inside it, if they hold no files. Never removes files."""
+    if not directory.is_dir():
+        return
+    for path in sorted((p for p in directory.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+        with contextlib.suppress(OSError):  # not empty after all, or already gone
+            path.rmdir()
+    with contextlib.suppress(OSError):
+        directory.rmdir()
+
+
 def move_file(source: Path, target: Path) -> None:
     """Move a file, keeping its modification time (the post date) where the destination allows it.
 
@@ -197,17 +232,30 @@ def move_file(source: Path, target: Path) -> None:
 
 
 @contextlib.contextmanager
-def run_lock(directory: Path) -> Iterator[None]:
+def run_lock(
+    directory: Path,
+    lock_name: str = "manager.lock",
+    message: str = "Another manager run is already in progress",
+) -> Iterator[None]:
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "manager.lock").open("w") as lock_file:
+    with (directory / lock_name).open("w") as lock_file:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise RunLockedError("Another manager run is already in progress")
+            raise RunLockedError(message)
         try:
             yield
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def source_lock(directory: Path, source: dict) -> contextlib.AbstractContextManager[None]:
+    """Held while one source downloads, so a scheduled run and an on-demand run never run the same source at once"""
+    return run_lock(
+        directory / "locks",
+        f"{source['kind']}_{source['name'].lower()}.lock",
+        f"{source['kind']} {source['name']} is already being downloaded",
+    )
 
 
 def is_locked(directory: Path) -> bool:
@@ -252,8 +300,9 @@ def run_source(
     rules: dict[str, list[str]],
     files: dict[str, Path],
     sort_override: Optional[str] = None,
+    time_override: Optional[str] = None,
 ) -> dict:
-    cmd = build_command(settings, source, rules, files, sort_override)
+    cmd = build_command(settings, source, rules, files, sort_override, time_override)
     download_dir = download_directory(settings, source)
     download_dir.mkdir(parents=True, exist_ok=True)
     before = _files_in(download_dir)
@@ -273,6 +322,8 @@ def run_source(
         with log_path.open("w") as log_file:
             exit_code = subprocess.run(  # noqa: S603
                 cmd,
+                # bdfrx looks in its current directory for config.cfg and bdfrx.db, so give every run the same one
+                cwd=log_dir(settings),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 timeout=int(settings["run_timeout"]),
@@ -303,6 +354,8 @@ def run_source(
         files_new, files_skipped = move_staged(download_dir, destination(settings, source))
     else:
         files_new, files_skipped = len(downloaded), 0
+    # A source that yielded nothing (no new posts, or a deleted account) shouldn't leave an empty folder behind
+    remove_empty_dirs(download_dir)
     status = "ok" if exit_code == 0 else "failed"
 
     conn.execute(
@@ -315,16 +368,19 @@ def run_source(
         "consecutive_failures = CASE WHEN ? = 'ok' THEN 0 ELSE consecutive_failures + 1 END WHERE id = ?;",
         (started, status, files_new, status, source["id"]),
     )
+    # Deactivate accounts Reddit says are gone, so they aren't retried every run
+    deactivated = None
     if source["kind"] == "user":
         for pattern, new_status, note in _ACCOUNT_GONE:
             if pattern.search(output):
+                deactivated = f"{note} ({started[:10]})"
                 conn.execute(
                     "UPDATE sources SET status = ?, note = ? WHERE id = ?;",
-                    (new_status, f"{note} ({started[:10]})", source["id"]),
+                    (new_status, deactivated, source["id"]),
                 )
                 break
     conn.commit()
-    return service.get_run(conn, run_id)
+    return {**service.get_run(conn, run_id), "deactivated": deactivated}
 
 
 def run(
@@ -333,6 +389,7 @@ def run(
     names: Optional[list[str]] = None,
     sort_override: Optional[str] = None,
     *,
+    time_override: Optional[str] = None,
     dry_run: bool = False,
     progress: Callable[[str], None] = logger.info,
 ) -> list[dict]:
@@ -347,7 +404,11 @@ def run(
         planned = []
         for source in sources:
             reason = skip_reason(source, rules)
-            cmd = None if reason else shlex.join(build_command(settings, source, rules, files, sort_override))
+            cmd = (
+                None
+                if reason
+                else shlex.join(build_command(settings, source, rules, files, sort_override, time_override))
+            )
             planned.append({"kind": source["kind"], "name": source["name"], "skipped": reason, "command": cmd})
         return planned
 
@@ -359,8 +420,38 @@ def run(
                 progress(f"[{index}/{len(sources)}] {source['kind']} {source['name']}: skipped, {reason}")
                 continue
             progress(f"[{index}/{len(sources)}] {source['kind']} {source['name']}")
-            result = run_source(conn, source, settings, rules, files, sort_override)
+            try:
+                with source_lock(directory, source):
+                    result = run_source(conn, source, settings, rules, files, sort_override, time_override)
+            except RunLockedError:
+                progress("    skipped, already being downloaded by another run")
+                continue
             found = f", {result['posts_found']} post(s) recorded" if result["posts_found"] is not None else ""
             progress(f"    {result['status']}, {result['files_new']} new file(s){found}")
+            if result["deactivated"]:
+                progress(f"    deactivated: {result['deactivated']}")
             results.append(result)
     return results
+
+
+def run_one(
+    conn: sqlite3.Connection,
+    kind: str,
+    name: str,
+    *,
+    sort_override: Optional[str] = None,
+    time_override: Optional[str] = None,
+) -> dict:
+    """Download one active source now, alongside any batch run; only the same source running already blocks it"""
+    settings = service.get_settings(conn)
+    rules = _grouped_rules(conn)
+    source = service.get_source(conn, kind, name)
+    if source["status"] != "active":
+        raise service.ManagerError(f"{kind} {source['name']} is {source['status']}, not active")
+    if reason := skip_reason(source, rules):
+        raise service.ManagerError(f"{kind} {source['name']} is not downloaded: {reason}")
+    directory = log_dir(settings)
+    files = rule_files(directory, rules)
+    write_rule_files(files, rules)
+    with source_lock(directory, source):
+        return run_source(conn, source, settings, rules, files, sort_override, time_override)

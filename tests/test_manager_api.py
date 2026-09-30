@@ -196,3 +196,63 @@ def test_set_aside_endpoints(client: TestClient, tmp_path: Path):
     assert client.delete("/set-aside/alice").json() == {"moved": 2, "skipped": []}
     assert (folder / "alice_pics_aaa111_10.jpg").exists()
     assert client.delete("/set-aside/alice").status_code == 404
+
+
+def _wait_for_downloads(client: TestClient) -> dict:
+    for _ in range(200):
+        state = client.get("/downloads").json()
+        if not state["current"] and not state["pending"] and state["last"]:
+            return state
+        time.sleep(0.05)
+    raise AssertionError(f"downloads never finished: {state}")
+
+
+def test_follow_starts_a_download(client: TestClient, fake_bdfrx: Path, tmp_path: Path):  # noqa: F811
+    _configure(tmp_path / "api.db", bdfrx_command=f"{sys.executable} {fake_bdfrx}")
+    _media_setup(tmp_path)
+    assert client.get("/downloads").json() == {"current": None, "pending": [], "last": None}
+    promoted = client.post("/candidates/alice/promote").json()
+    assert (promoted["status"], promoted["download"]) == ("active", "queued")
+    last = _wait_for_downloads(client)["last"]
+    assert (last["name"], last["status"], last["files_new"]) == ("alice", "ok", 2)
+    run = client.get(f"/runs/{last['run_id']}").json()
+    assert "--time all" in run["command"]
+    assert client.get("/status").json()["downloads"]["last"]["run_id"] == last["run_id"]
+
+    no_download = client.post("/candidates/bob/promote", params={"download": False}).json()
+    assert no_download["download"] is None
+
+
+def test_download_endpoint_and_skips(client: TestClient, fake_bdfrx: Path, tmp_path: Path):  # noqa: F811
+    _configure(tmp_path / "api.db", bdfrx_command=f"{sys.executable} {fake_bdfrx}")
+    client.post("/sources", json={"kind": "subreddit", "name": "pics"})
+    assert client.post("/sources/subreddit/pics/download", params={"time": "week"}).json() == {"download": "queued"}
+    last = _wait_for_downloads(client)["last"]
+    assert "--time week" in client.get(f"/runs/{last['run_id']}").json()["command"]
+    assert client.post("/sources/user/nobody/download").status_code == 404
+
+    # A source removed before its download starts is skipped, not downloaded
+    queue = client.app.state.downloads
+    assert queue.add("user", "ghost") == "queued"
+    for _ in range(100):
+        if queue.snapshot()["last"]["name"] == "ghost":
+            break
+        time.sleep(0.05)
+    assert queue.snapshot()["last"]["status"] == "skipped"
+
+
+def test_follow_of_a_gone_account_reports_deactivation(client: TestClient, fake_bdfrx: Path, tmp_path: Path):  # noqa: F811
+    _configure(tmp_path / "api.db", bdfrx_command=f"{sys.executable} {fake_bdfrx}")
+    from bdfrx.manager import candidates
+
+    conn = db.connect(tmp_path / "api.db")
+    candidates.record_posts(
+        conn,
+        [{"post_id": "aaa111", "author": "gone", "subreddit": "pics", "score": 1, "posted_at": None, "files": []}],
+    )
+    conn.close()
+    client.post("/candidates/gone/promote")
+    last = _wait_for_downloads(client)["last"]
+    assert last["status"] == "deactivated"
+    assert "suspended" in last["reason"]
+    assert client.get("/sources/user/gone").json()["status"] == "banned"

@@ -39,7 +39,7 @@ Importing again only adds names that are not already in the database.
 | `default_sort`           | `new`                                        |
 | `default_time`           | `day`                                        |
 | `default_filter_gender`  | `male`                                       |
-| `history_db_user`        | `~/.config/bdfrx/userdb/userdb`              |
+| `history_db_user`        | `~/.config/bdfrx/userdbs/{name}.db`          |
 | `history_db_subreddit`   | empty: bdfrx's default database              |
 
 Set `staging_root` when `dest_root` is a network share: files are downloaded locally, then moved into the archive
@@ -47,6 +47,31 @@ without overwriting anything already there. It is required when the share does n
 (for example a CIFS mount where files are owned by root), because bdfrx stops with "Operation not permitted" when it
 sets a downloaded file's date. When the manager runs on the machine that holds the archive, leave it
 empty.
+
+### History databases
+
+bdfrx remembers what it has downloaded in a history DB. `{name}` in `history_db_user` or `history_db_subreddit`
+becomes the source's name, giving each source its own DB. Per-user DBs are the default: each user's archive is then
+complete by design (a shared DB would skip content someone else already posted), and user runs never contend for one
+DB. Subreddits share one DB by default, since cross-posting makes shared de-duplication worthwhile there.
+
+bdfrx commits after every post and waits up to 60 seconds for another process's write, so several runs can share one
+DB; they only failed with "database is locked" when bdfrx held one transaction for a whole run.
+
+To move from one shared user DB to per-user DBs:
+
+```bash
+bdfrx-manager split-user-history ~/.config/bdfrx/userdb/userdb --into '~/.config/bdfrx/userdbs/{name}.db' \
+    --archive-root /mnt/c/bdfrx --dry-run
+bdfrx-manager split-user-history ~/.config/bdfrx/userdb/userdb --into '~/.config/bdfrx/userdbs/{name}.db' \
+    --archive-root /mnt/c/bdfrx
+bdfrx-manager config set history_db_user '~/.config/bdfrx/userdbs/{name}.db'
+```
+
+The shared DB is only read. Rows are attributed to users by the `users/<name>/` in saved file paths and by the post
+IDs of files in the archive's `users/<name>/` folders. Links, and posts marked done without a file (failed
+downloads), can't be attributed and are left out; bdfrx checks post IDs first, so the only effect is that such failed
+posts get one more attempt. Existing per-user DBs are added to, never replaced.
 
 ## Everyday use
 
@@ -91,6 +116,7 @@ bdfrx-manager scan-archive                     # one-time: record posts already 
 bdfrx-manager candidates                       # most active first
 bdfrx-manager candidates --min-posts 5 --since 30d --subreddit somesub
 bdfrx-manager candidates promote someone       # add as an active user source
+bdfrx-manager candidates promote someone --download   # ...and download their posts right away
 bdfrx-manager candidates dismiss someone       # hide from the list; their posts still download
 bdfrx-manager candidates undismiss someone
 bdfrx-manager candidates dismissed
@@ -98,6 +124,10 @@ bdfrx-manager candidates dismissed
 
 Each post's file locations are recorded too, so the API can serve them as previews; it only ever serves files it
 has recorded. `scan-archive` fills in locations for posts recorded before they were kept.
+
+Following someone from the web UI (or `POST /candidates/{name}/promote`) also starts downloading their posts in the
+background, using the `follow_download_time` time window (default `all`, i.e. as far back as Reddit lists, about
+1,000 posts) once; after that, scheduled runs use their normal settings.
 
 `scan-archive` only reads file names and dates. It skips posts already recorded, so it can be stopped and run again,
 and `--subreddit` limits it to some folders. Over the network it takes about a minute per 45,000 files.
@@ -136,7 +166,10 @@ bdfrx-manager runs --failed           # recent failures
 bdfrx-manager log 42                  # full bdfrx output of run 42
 ```
 
-A lock file stops two runs from overlapping; a run that finds the lock exits with code 75 and does nothing. A run
+A lock file stops two scheduled runs from overlapping; a run that finds the lock exits with code 75 and does nothing.
+Each source also has its own lock, so an on-demand download (from following someone, or `POST
+/sources/{kind}/{name}/download`) runs alongside a scheduled run, and whichever reaches a source second skips it.
+`bdfrx-manager run --time all` overrides the time window for one run. A run
 exits with code 1 if any source failed.
 
 When bdfrx reports that a user is suspended or does not exist, the manager marks that user `banned` and records why
@@ -203,8 +236,10 @@ journalctl --user -u bdfrx-manager-api -f
 | GET    | `/runs/{id}/log`             | Full bdfrx output                                    |
 | POST   | `/runs`                      | Start a run in the background (`dry_run` returns the plan) |
 | GET    | `/candidates`                | Candidate users (`?min_posts=`, `?since=`, `?subreddit=`, `?limit=`) |
+| POST   | `/sources/{kind}/{name}/download` | Download one source now, in the background (`?time=`) |
+| GET    | `/downloads`                 | On-demand downloads: current, queued, and the last result |
 | GET    | `/candidates/{name}/posts`   | Their recent posts, each file with a `url` (`?limit=`) |
-| POST   | `/candidates/{name}/promote` | Add as an active user source                         |
+| POST   | `/candidates/{name}/promote` | Add as an active user source and download them (`?download=false` to skip) |
 | GET    | `/candidates/dismissed`      | Dismissed users                                      |
 | PUT    | `/candidates/{name}/dismissed` | Dismiss (optional `{"reason": ...}`)               |
 | DELETE | `/candidates/{name}/dismissed` | Undismiss                                          |

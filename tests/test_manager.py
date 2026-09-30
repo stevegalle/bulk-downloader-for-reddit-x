@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from bdfrx.manager import candidates, db, importer, runner, service, setaside
+from bdfrx.manager import candidates, db, history, importer, runner, service, setaside
 from bdfrx.manager.cli import cli
 
 
@@ -27,6 +27,7 @@ def fake_bdfrx(tmp_path: Path) -> Path:
     script.write_text(
         textwrap.dedent(
             """
+            import os
             import sys
             from pathlib import Path
             args = sys.argv[1:]
@@ -44,6 +45,7 @@ def fake_bdfrx(tmp_path: Path) -> Path:
             (target / f"{name}_post1.jpg").write_text("x")
             (target / "shared.jpg").write_text("new")
             print("ARGS", " ".join(args))
+            print("CWD", os.getcwd())
             """,
         ),
     )
@@ -155,13 +157,22 @@ def test_build_command(conn: sqlite3.Connection):
     settings = service.get_settings(conn)
     rules = {"ignore_user": ["spammer"], "skip_domain": ["example.com"], "skip_subreddit": ["boring"]}
     user_cmd = runner.build_command(
-        settings, service.get_source(conn, "user", "alice"), rules, {"exclude_post": Path("ids.txt")},
+        settings,
+        service.get_source(conn, "user", "alice"),
+        rules,
+        {"exclude_post": Path("ids.txt")},
     )
-    assert user_cmd[3:6] == ["download", str(Path(settings["dest_root"], "users", "alice")), "--user"]
+    start = runner.default_bdfrx_command()
+    assert user_cmd[: len(start)] == start
+    assert user_cmd[len(start) : len(start) + 3] == [
+        "download",
+        str(Path(settings["dest_root"], "users", "alice")),
+        "--user",
+    ]
     assert "--submitted" in user_cmd
     assert "--filter-gender" not in user_cmd
     assert user_cmd[user_cmd.index("--min-score") + 1] == "3"
-    assert user_cmd[user_cmd.index("--db-file") + 1].endswith("userdb/userdb")
+    assert user_cmd[user_cmd.index("--db-file") + 1].endswith("/.config/bdfrx/userdbs/alice.db")
     assert user_cmd[user_cmd.index("--exclude-id-file") + 1] == "ids.txt"
     assert user_cmd[-2:] == ["--max-wait-time", "5"]
 
@@ -249,6 +260,10 @@ def test_run_failures_and_suspended_users(conn: sqlite3.Connection, fake_bdfrx: 
     gone = service.get_source(conn, "user", "gone")
     assert gone["status"] == "banned"
     assert "suspended" in gone["note"]
+    assert results["gone"]["deactivated"] == gone["note"]
+    assert results["broken"]["deactivated"] is None
+    # Deactivated accounts are left out of later runs
+    assert "gone" not in [r["source_name"] for r in runner.run(conn)]
 
 
 def test_run_skips_by_rule_and_orders_by_last_run(conn: sqlite3.Connection, fake_bdfrx: Path):
@@ -714,3 +729,267 @@ def test_build_command_rule_files(conn: sqlite3.Connection, tmp_path: Path):
     assert "--ignore-user" not in cmd
     runner.write_rule_files(files, rules)
     assert (tmp_path / "ignore_users.txt").read_text() == "a\nb\n"
+
+
+# Per-user history DBs
+
+
+@pytest.mark.parametrize(
+    ("file_name", "author", "expected"),
+    (
+        ("PaperDom_CumToAbuse_1f9ymfg_98.gif", "PaperDom", "1f9ymfg"),
+        ("zoey_blowie_18_19_1wjikf4_51_2.mp4", "zoey_blowie", "1wjikf4"),
+        ("alice_shibari_1wls15c_585.jpg", "alice", "1wls15c"),
+        ("alice_pics_abc123.png", "ALICE", "abc123"),
+        ("alice_gonewildaudio_1wnmh0b_15.txt", "alice", "1wnmh0b"),
+        ("Thumbs.db", "alice", None),
+    ),
+)
+def test_post_id_from_file_name(file_name: str, author: str, expected: str):
+    assert history.post_id_from_file_name(file_name, author) == expected
+
+
+def test_history_db_path_per_source(conn: sqlite3.Connection):
+    service.add_source(conn, "user", "Alice")
+    service.set_setting(conn, "history_db_user", "~/dbs/{name}.db")
+    cmd = runner.build_command(service.get_settings(conn), service.get_source(conn, "user", "alice"), {})
+    assert cmd[cmd.index("--db-file") + 1] == str(Path("~/dbs/Alice.db").expanduser())
+
+
+def _shared_db(path: Path) -> Path:
+    shared = sqlite3.connect(path)
+    shared.executescript(
+        "CREATE TABLE hash (hash TEXT UNIQUE, path TEXT); CREATE TABLE post_id (post_id TEXT UNIQUE);"
+        "CREATE TABLE link (link TEXT UNIQUE);",
+    )
+    shared.executemany(
+        "INSERT INTO hash VALUES (?, ?);",
+        [
+            ("h1", "/old/data_local/users/Alice/Alice_pics_aaa111_10.jpg"),
+            ("h2", "/old/data_local/users/Alice/Alice_cats_aaa222_3_2.jpg"),
+            ("h3", "/old/data_local/users/bob/bob_pics_bbb111.mp4"),
+            ("h4", "/old/data_local/subreddits/pics/carol_pics_ccc111_1.jpg"),
+        ],
+    )
+    shared.executemany(
+        "INSERT INTO post_id VALUES (?);",
+        [("aaa111",), ("aaa222",), ("aaa333",), ("bbb111",), ("zzz999",)],
+    )
+    shared.commit()
+    shared.close()
+    return path
+
+
+def test_split_user_history(conn: sqlite3.Connection, tmp_path: Path):
+    shared = _shared_db(tmp_path / "userdb")
+    before = shared.read_bytes()
+    archive = tmp_path / "archive"
+    (archive / "users" / "alice").mkdir(parents=True)
+    (archive / "users" / "alice" / "alice_dogs_aaa333_5.jpg").write_text("x")
+    (archive / "users" / "alice" / "Thumbs.db").write_text("x")
+
+    plan = history.plan_split(shared, [archive], known_names=["Alice", "dave"])
+    assert plan.users["alice"].post_ids == {"aaa111", "aaa222", "aaa333"}
+    assert set(plan.users["alice"].hashes) == {"h1", "h2"}
+    assert plan.users["bob"].post_ids == {"bbb111"}
+    assert "carol" not in plan.users
+    assert (plan.shared_post_ids, plan.attributed_post_ids) == (5, 4)
+
+    # Posts the manager saw in subreddits add to users already found, and only for post IDs the shared DB has
+    candidates.record_posts(conn, [_post("zzz999", "BOB"), _post("yyy888", "bob"), _post("xxx777", "carol")])
+    with_manager = history.plan_split(shared, [archive], known_names=["Alice"], manager_conn=conn)
+    assert with_manager.users["bob"].post_ids == {"bbb111", "zzz999"}
+    assert "carol" not in with_manager.users
+
+    pattern = str(tmp_path / "userdbs" / "{name}.db")
+    assert history.write_split(plan, pattern) == 2
+    assert not (tmp_path / "userdbs" / "dave.db").exists()
+    alice = sqlite3.connect(tmp_path / "userdbs" / "Alice.db")
+    assert {r[0] for r in alice.execute("SELECT post_id FROM post_id;")} == {"aaa111", "aaa222", "aaa333"}
+    assert alice.execute("SELECT path FROM hash WHERE hash = 'h1';").fetchone()[0].endswith("Alice_pics_aaa111_10.jpg")
+    assert {r[0] for r in alice.execute("SELECT name FROM sqlite_master WHERE type = 'table';")} >= {"link"}
+    alice.close()
+    # Running again adds nothing new and keeps what is there
+    assert history.write_split(plan, pattern) == 2
+    assert (
+        sqlite3.connect(tmp_path / "userdbs" / "Alice.db").execute("SELECT COUNT(*) FROM post_id;").fetchone()[0] == 3
+    )
+    assert shared.read_bytes() == before
+
+
+def test_cli_split_user_history(tmp_path: Path):
+    shared = _shared_db(tmp_path / "userdb")
+    cli_runner = CliRunner()
+    db_args = ["--db", str(tmp_path / "cli.db")]
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    pattern = str(tmp_path / "userdbs" / "{name}.db")
+
+    def invoke(*args: str) -> str:
+        result = cli_runner.invoke(cli, [*db_args, *args], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    invoke("add", "user", "alice", "newbie")
+    dry = invoke("split-user-history", str(shared), "--into", pattern, "--archive-root", str(archive), "--dry-run")
+    assert "2 user(s) with history; 3 of 5 shared post IDs (60.0%) attributed" in dry
+    assert "newbie" in dry
+    assert not (tmp_path / "userdbs").exists()
+    out = invoke("split-user-history", str(shared), "--into", pattern, "--archive-root", str(archive))
+    assert "2 per-user DB(s) written" in out
+    assert (tmp_path / "userdbs" / "alice.db").exists()
+    bad = cli_runner.invoke(cli, [*db_args, "split-user-history", str(shared), "--into", str(tmp_path / "x.db")])
+    assert bad.exit_code != 0
+
+
+# On-demand downloads (e.g. when following someone)
+
+
+def test_time_override(conn: sqlite3.Connection):
+    service.add_source(conn, "user", "alice", time="week")
+    source = service.get_source(conn, "user", "alice")
+    settings = service.get_settings(conn)
+    assert (
+        runner.build_command(settings, source, {})[runner.build_command(settings, source, {}).index("--time") + 1]
+        == "week"
+    )
+    cmd = runner.build_command(settings, source, {}, time_override="all")
+    assert cmd[cmd.index("--time") + 1] == "all"
+
+
+def test_run_one(conn: sqlite3.Connection, fake_bdfrx: Path):
+    use_fake(conn, fake_bdfrx)
+    service.add_source(conn, "user", "alice")
+    service.add_source(conn, "user", "sleepy", status="paused")
+    run = runner.run_one(conn, "user", "ALICE", time_override="all")
+    assert run["status"] == "ok"
+    assert "--time all" in run["command"]
+    with pytest.raises(service.ManagerError, match="paused"):
+        runner.run_one(conn, "user", "sleepy")
+    with pytest.raises(service.NotFoundError):
+        runner.run_one(conn, "user", "nobody")
+    service.ignore_user(conn, "alice")
+    service.update_source(conn, "user", "alice", status="active")
+    with pytest.raises(service.ManagerError, match="ignored"):
+        runner.run_one(conn, "user", "alice")
+
+
+def test_source_lock_keeps_a_source_from_running_twice(conn: sqlite3.Connection, fake_bdfrx: Path, tmp_path: Path):
+    use_fake(conn, fake_bdfrx)
+    service.add_source(conn, "user", "alice")
+    service.add_source(conn, "user", "bob")
+    alice = service.get_source(conn, "user", "alice")
+    messages = []
+    with runner.source_lock(tmp_path / "logs", alice):
+        results = runner.run(conn, progress=messages.append)
+        with pytest.raises(runner.RunLockedError, match="already being downloaded"):
+            runner.run_one(conn, "user", "alice")
+    assert [r["source_name"] for r in results] == ["bob"]
+    assert any("already being downloaded" in m for m in messages)
+    # The batch lock doesn't block single-source runs
+    with runner.run_lock(tmp_path / "logs"):
+        assert runner.run_one(conn, "user", "alice")["status"] == "ok"
+
+
+def test_write_rule_files_leaves_no_temporary_files(tmp_path: Path):
+    rules = {"ignore_user": ["a"], "exclude_post": ["abc123"]}
+    runner.write_rule_files(runner.rule_files(tmp_path, rules), rules)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["exclude_ids.txt", "ignore_users.txt"]
+
+
+def test_follow_download_time_setting(conn: sqlite3.Connection):
+    assert service.get_settings(conn)["follow_download_time"] == "all"
+    service.set_setting(conn, "follow_download_time", "month")
+    with pytest.raises(service.ManagerError):
+        service.set_setting(conn, "follow_download_time", "forever")
+
+
+def test_cli_promote_download_and_run_time(tmp_path: Path, fake_bdfrx: Path):
+    cli_runner = CliRunner()
+    db_args = ["--db", str(tmp_path / "cli.db")]
+
+    def invoke(*args: str) -> str:
+        result = cli_runner.invoke(cli, [*db_args, *args], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    invoke("config", "set", "log_dir", str(tmp_path / "logs"))
+    invoke("config", "set", "dest_root", str(tmp_path / "dest"))
+    invoke("config", "set", "bdfrx_command", f"{sys.executable} {fake_bdfrx}")
+    conn = db.connect(tmp_path / "cli.db")
+    candidates.record_posts(conn, [_post("aaa111", "alice")])
+    conn.close()
+    out = invoke("candidates", "promote", "alice", "--download")
+    assert "user alice is now active" in out
+    assert "ok, 2 new file(s)" in out
+    assert "--time all" in invoke("log", "1")
+    assert "--time month" in invoke("run", "--dry-run", "--time", "month")
+
+
+def test_default_bdfrx_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    fake_python = tmp_path / "venv" / "bin" / "python"
+    fake_python.parent.mkdir(parents=True)
+    monkeypatch.setattr(runner.sys, "executable", str(fake_python))
+    assert runner.default_bdfrx_command() == [str(fake_python), "-m", "bdfrx"]
+    (fake_python.parent / "bdfrx").write_text("#!/bin/sh\n")
+    assert runner.default_bdfrx_command() == [str(fake_python.parent / "bdfrx")]
+
+
+def test_bdfrx_runs_in_the_log_dir(
+    conn: sqlite3.Connection,
+    fake_bdfrx: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Wherever the manager itself is started from, e.g. a home directory holding a venv called bdfrx
+    home = tmp_path / "home"
+    (home / "bdfrx").mkdir(parents=True)
+    monkeypatch.chdir(home)
+    use_fake(conn, fake_bdfrx)
+    service.add_source(conn, "user", "alice")
+    run = runner.run_one(conn, "user", "alice")
+    assert f"CWD {tmp_path / 'logs'}" in Path(run["log_path"]).read_text()
+
+
+# Empty folders
+
+
+def test_remove_empty_dirs(tmp_path: Path):
+    (tmp_path / "empty" / "nested" / "deeper").mkdir(parents=True)
+    runner.remove_empty_dirs(tmp_path / "empty")
+    assert not (tmp_path / "empty").exists()
+    (tmp_path / "full" / "nested").mkdir(parents=True)
+    (tmp_path / "full" / "nested" / "keep.jpg").write_text("x")
+    (tmp_path / "full" / "hollow").mkdir()
+    runner.remove_empty_dirs(tmp_path / "full")
+    assert (tmp_path / "full" / "nested" / "keep.jpg").exists()
+    assert not (tmp_path / "full" / "hollow").exists()
+    runner.remove_empty_dirs(tmp_path / "missing")  # no error
+
+
+@pytest.mark.parametrize("staged", (False, True))
+def test_runs_that_download_nothing_leave_no_folder(
+    conn: sqlite3.Connection,
+    fake_bdfrx: Path,
+    tmp_path: Path,
+    staged: bool,  # noqa: FBT001
+):
+    use_fake(conn, fake_bdfrx)
+    if staged:
+        service.set_setting(conn, "staging_root", str(tmp_path / "staging"))
+    service.add_source(conn, "user", "gone")  # the fake reports the account as deleted and downloads nothing
+    service.add_source(conn, "user", "alice")
+    runner.run(conn)
+    assert not (tmp_path / "dest" / "users" / "gone").exists()
+    assert (tmp_path / "dest" / "users" / "alice" / "alice_post1.jpg").exists()
+    if staged:
+        assert not (tmp_path / "staging" / "users" / "gone").exists()
+        assert not (tmp_path / "staging" / "users" / "alice").exists()
+
+
+def test_set_aside_removes_emptied_user_folder(conn: sqlite3.Connection, archive_with_alice: Path):
+    setaside.set_aside(conn, "alice")
+    assert not (archive_with_alice / "users" / "alice").exists()
+    assert (archive_with_alice / "subreddits" / "pics").is_dir()  # shared, and bob's file is still there
+    setaside.restore(conn, "alice")
+    assert (archive_with_alice / "users" / "alice" / "alice_dogs_ddd444_7.jpg").exists()

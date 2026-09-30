@@ -1,5 +1,6 @@
 """HTTP API over the manager service. Requires the 'manager' extra (fastapi, uvicorn)."""
 
+import queue
 import secrets
 import sqlite3
 import threading
@@ -68,6 +69,65 @@ UI_DIR = Path(__file__).parent / "ui"
 KEY_COOKIE = "bdfrx_manager_key"
 
 
+class DownloadQueue:
+    """Downloads of single sources requested through the API (e.g. on follow), one at a time in a worker thread.
+
+    They run alongside scheduled runs; per-source locks keep the same source from running twice. The worker checks
+    each job's source is still there and active when it starts, so undoing a follow drops its queued download.
+    """
+
+    def __init__(self, db_path: Optional[Union[str, Path]]) -> None:
+        self.db_path = db_path
+        self.jobs: queue.Queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.pending: list[dict] = []
+        self.current: Optional[dict] = None
+        self.last: Optional[dict] = None
+        self.thread: Optional[threading.Thread] = None
+
+    def add(self, kind: str, name: str, time: Optional[str] = None) -> str:
+        job = {"kind": kind, "name": name, "time": time}
+        key = (kind, name.lower())
+        with self.lock:
+            active = [*self.pending, *([self.current] if self.current else [])]
+            if any((j["kind"], j["name"].lower()) == key for j in active):
+                return "already queued"
+            self.pending.append(job)
+            self.jobs.put(job)
+            if self.thread is None or not self.thread.is_alive():
+                self.thread = threading.Thread(target=self._work, name="bdfrx-manager-downloads", daemon=True)
+                self.thread.start()
+        return "queued"
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {"current": self.current, "pending": list(self.pending), "last": self.last}
+
+    def _work(self) -> None:
+        while True:
+            job = self.jobs.get()
+            with self.lock:
+                self.pending.remove(job)
+                self.current = job
+            outcome = {**job}
+            conn = db.connect(self.db_path)
+            try:
+                run = runner.run_one(conn, job["kind"], job["name"], time_override=job["time"])
+                outcome.update(run_id=run["id"], status=run["status"], files_new=run["files_new"])
+                if run["deactivated"]:
+                    outcome.update(status="deactivated", reason=run["deactivated"])
+            except service.ManagerError as e:  # unfollowed, paused, ignored, or already downloading
+                outcome.update(status="skipped", reason=str(e))
+            except Exception as e:  # noqa: BLE001 - keep the worker alive whatever one job does
+                outcome.update(status="failed", reason=str(e))
+            finally:
+                conn.close()
+                with self.lock:
+                    self.current = None
+                    self.last = outcome
+                self.jobs.task_done()
+
+
 def create_app(  # noqa: PLR0915
     db_path: Optional[Union[str, Path]] = None,
     api_key: Optional[str] = None,
@@ -89,6 +149,8 @@ def create_app(  # noqa: PLR0915
             raise HTTPException(401, "Missing or wrong X-API-Key header")
 
     app = FastAPI(title="bdfrx manager", version="1", dependencies=[Depends(check_key)])
+    downloads = DownloadQueue(db_path)
+    app.state.downloads = downloads
     run_thread: dict[str, Optional[threading.Thread]] = {"thread": None}
 
     def get_conn() -> Iterator[sqlite3.Connection]:
@@ -119,7 +181,11 @@ def create_app(  # noqa: PLR0915
     @app.get("/status")
     def get_status(conn: Conn) -> dict:
         thread = run_thread["thread"]
-        return {**service.summary(conn), "run_in_progress": bool(thread and thread.is_alive())}
+        return {
+            **service.summary(conn),
+            "run_in_progress": bool(thread and thread.is_alive()),
+            "downloads": downloads.snapshot(),
+        }
 
     # Sources
 
@@ -156,6 +222,17 @@ def create_app(  # noqa: PLR0915
     ) -> dict:
         """Fields present in the body are updated; an explicit null clears an override"""
         return service.update_source(conn, kind, name, **body.model_dump(exclude_unset=True))
+
+    @app.post("/sources/{kind}/{name}/download", status_code=202)
+    def download_source(kind: SourceKind, name: str, conn: Conn, time: Optional[Time] = None) -> dict:
+        """Download one source now, in the background, alongside any scheduled run"""
+        source = service.get_source(conn, kind, name)
+        return {"download": downloads.add(kind, source["name"], time)}
+
+    @app.get("/downloads")
+    def list_downloads() -> dict:
+        """The on-demand download queue: what is downloading, what is waiting, and how the last one went"""
+        return downloads.snapshot()
 
     @app.delete("/sources/{kind}/{name}", status_code=204)
     def remove_source(kind: SourceKind, name: str, conn: Conn) -> None:
@@ -201,8 +278,16 @@ def create_app(  # noqa: PLR0915
         return posts
 
     @app.post("/candidates/{name}/promote")
-    def promote_candidate(name: str, conn: Conn) -> dict:
-        return candidates.promote(conn, name)
+    def promote_candidate(
+        name: str,
+        conn: Conn,
+        download: bool = Query(True, description="Also download their posts now (time window: follow_download_time)"),
+    ) -> dict:
+        source = candidates.promote(conn, name)
+        queued = None
+        if download:
+            queued = downloads.add("user", source["name"], service.get_settings(conn)["follow_download_time"])
+        return {**source, "download": queued}
 
     @app.get("/candidates/dismissed")
     def list_dismissed(conn: Conn) -> list[dict]:

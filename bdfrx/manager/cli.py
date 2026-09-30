@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 import click
 
-from bdfrx.manager import candidates, db, importer, runner, service, setaside
+from bdfrx.manager import candidates, db, history, importer, runner, service, setaside
 
 KIND = click.Choice(service.SOURCE_KINDS)
 CLEAR = "default"
@@ -477,13 +477,22 @@ def cli_candidates(
 
 @cli_candidates.command("promote")
 @click.argument("names", nargs=-1, required=True)
+@click.option("--download", is_flag=True, help="Download their posts right away (time window: follow_download_time)")
 @click.pass_context
-def cli_candidates_promote(context: click.Context, names: tuple[str]) -> None:
+def cli_candidates_promote(context: click.Context, names: tuple[str], download: bool) -> None:
     """Start downloading these users (adds them as active user sources)."""
+    conn = _conn(context)
     for name in names:
         try:
-            source = candidates.promote(_conn(context), name)
+            source = candidates.promote(conn, name)
             click.echo(f"user {source['name']} is now active")
+            if download:
+                time = service.get_settings(conn)["follow_download_time"]
+                click.echo(f"    downloading their posts (time: {time})…")
+                run = runner.run_one(conn, "user", source["name"], time_override=time)
+                click.echo(f"    {run['status']}, {run['files_new']} new file(s) (run {run['id']})")
+                if run["deactivated"]:
+                    click.echo(f"    deactivated: {run['deactivated']}")
         except service.ManagerError as e:
             click.echo(f"skipped: {e}", err=True)
 
@@ -551,6 +560,62 @@ def cli_scan_archive(context: click.Context, subreddits: tuple[str], root: Optio
     )
 
 
+@cli.command("split-user-history")
+@click.argument("shared_db", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--into",
+    "pattern",
+    required=True,
+    help="Per-user DB path containing {name}, e.g. ~/.config/bdfrx/userdbs/{name}.db",
+)
+@click.option(
+    "--archive-root",
+    "archive_roots",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Archive whose users/<name>/ folders to read post IDs from (repeatable; default: dest_root)",
+)
+@click.option("--dry-run", is_flag=True, help="Report what each user would get without writing anything")
+@click.pass_context
+def cli_split_user_history(
+    context: click.Context,
+    shared_db: Path,
+    pattern: str,
+    archive_roots: tuple[Path],
+    dry_run: bool,
+) -> None:
+    """Split a shared bdfrx history DB (like userdb) into one DB per user.
+
+    The shared DB is only read. Existing per-user DBs are added to, never replaced. Afterwards, point
+    history_db_user at the same pattern to use them.
+    """
+    if "{name}" not in pattern:
+        raise click.BadParameter("must contain {name}", param_hint="--into")
+    conn = _conn(context)
+    roots = list(archive_roots) or [Path(service.get_settings(conn)["dest_root"]).expanduser()]
+    names = [source["name"] for source in service.list_sources(conn, kind="user")]
+    plan = history.plan_split(shared_db, roots, names, progress=click.echo, manager_conn=conn)
+    with_rows = [u for u in plan.users.values() if u.post_ids or u.hashes]
+    share = 100 * plan.attributed_post_ids / plan.shared_post_ids if plan.shared_post_ids else 0
+    click.echo(
+        f"{len(with_rows)} user(s) with history; {plan.attributed_post_ids} of {plan.shared_post_ids} shared post IDs "
+        f"({share:.1f}%) attributed, {sum(len(u.post_ids) for u in with_rows)} post IDs and "
+        f"{sum(len(u.hashes) for u in with_rows)} hashes in total",
+    )
+    empty = sorted(u.name for u in plan.users.values() if not (u.post_ids or u.hashes))
+    if empty:
+        click.echo(
+            f"{len(empty)} user source(s) with no history found (they'll start fresh): {', '.join(empty[:10])}"
+            + (" …" if len(empty) > 10 else ""),
+        )
+    if dry_run:
+        for user in sorted(with_rows, key=lambda u: u.name.lower())[:15]:
+            click.echo(f"  would write {history.user_db_path(pattern, user.name)}: {len(user.post_ids)} post IDs")
+        return
+    written = history.write_split(plan, pattern)
+    click.echo(f"{written} per-user DB(s) written. To use them: bdfrx-manager config set history_db_user '{pattern}'")
+
+
 # Running
 
 
@@ -563,6 +628,7 @@ def cli_scan_archive(context: click.Context, subreddits: tuple[str], root: Optio
     help="Only this source (repeatable). A bare name matches both kinds; u/name or r/name matches just one",
 )
 @click.option("--sort", type=click.Choice(service.SORTS), help="Override every source's sort for this run")
+@click.option("--time", type=click.Choice(service.TIMES), help="Override every source's time filter for this run")
 @click.option("--dry-run", is_flag=True, help="Print the bdfrx commands without running them")
 @click.pass_context
 def cli_run(
@@ -570,6 +636,7 @@ def cli_run(
     kinds: tuple[str],
     names: tuple[str],
     sort: Optional[str],
+    time: Optional[str],
     dry_run: bool,
 ) -> None:
     """Download new posts for every active source. This is what cron should call."""
@@ -579,6 +646,7 @@ def cli_run(
             kinds=list(kinds) or None,
             names=list(names) or None,
             sort_override=sort,
+            time_override=time,
             dry_run=dry_run,
             progress=click.echo,
         )
