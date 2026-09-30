@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,14 @@ _ACCOUNT_GONE = (
     (re.compile(r"User \S+ is banned"), "banned", "Reddit reports the account as suspended"),
     (re.compile(r"Could not find user \S+"), "banned", "Reddit could not find the account"),
 )
+
+
+# bdfrx log lines about files it couldn't get: for good (dead links, unsupported sites), or for now (retried next run)
+_FILE_FAILED = re.compile(
+    r"Failed to download resource|Could not download submission|failed to download submission"
+    r"|Unexpected error downloading submission|Could not generate file path",
+)
+_FILE_RETRY = re.compile(r"will try again next run")
 
 
 class RunLockedError(service.ManagerError):
@@ -258,6 +267,48 @@ def source_lock(directory: Path, source: dict) -> contextlib.AbstractContextMana
     )
 
 
+@contextlib.contextmanager
+def download_slot(directory: Path, slots: int, poll_seconds: float = 2.0) -> Iterator[int]:
+    """Hold one of `slots` download slots, waiting for one to free up.
+
+    Slots are lock files, so the limit holds across every process running downloads: the API server's workers,
+    'bdfrx-manager run' in a terminal, anything. The OS releases a slot if its holder dies.
+    """
+    directory = directory / "slots"
+    directory.mkdir(parents=True, exist_ok=True)
+    while True:
+        for index in range(slots):
+            lock_file = (directory / f"slot-{index}.lock").open("w")
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_file.close()
+                continue
+            try:
+                yield index
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                lock_file.close()
+            return
+        time.sleep(poll_seconds)
+
+
+def busy_slots(directory: Path, slots: int) -> int:
+    """How many download slots are held right now"""
+    busy = 0
+    for index in range(slots):
+        path = directory / "slots" / f"slot-{index}.lock"
+        if not path.exists():
+            continue
+        with path.open("w") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+            except BlockingIOError:
+                busy += 1
+    return busy
+
+
 def is_locked(directory: Path) -> bool:
     try:
         with run_lock(directory):
@@ -301,6 +352,25 @@ def run_source(
     files: dict[str, Path],
     sort_override: Optional[str] = None,
     time_override: Optional[str] = None,
+    on_start: Optional[Callable[[int], None]] = None,
+    trigger: str = "cli",
+) -> dict:
+    """Run bdfrx for one source, once one of the download slots is free"""
+    slots = int(settings["max_concurrent_downloads"])
+    with download_slot(log_dir(settings), slots):
+        return _run_source(conn, source, settings, rules, files, sort_override, time_override, on_start, trigger)
+
+
+def _run_source(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    source: dict,
+    settings: dict[str, str],
+    rules: dict[str, list[str]],
+    files: dict[str, Path],
+    sort_override: Optional[str],
+    time_override: Optional[str],
+    on_start: Optional[Callable[[int], None]],
+    trigger: str,
 ) -> dict:
     cmd = build_command(settings, source, rules, files, sort_override, time_override)
     download_dir = download_directory(settings, source)
@@ -317,6 +387,8 @@ def run_source(
         (source["id"], source["kind"], source["name"], started, shlex.join(cmd), str(log_path)),
     ).lastrowid
     conn.commit()
+    if on_start is not None:
+        on_start(run_id)
 
     try:
         with log_path.open("w") as log_file:
@@ -341,27 +413,41 @@ def run_source(
     output = log_path.read_text(errors="replace")
     downloaded = _files_in(download_dir) - before
     posts_found = None
-    if source["kind"] == "subreddit":
-        # Parse before any move below, while the files certainly exist, but record where they will end up
-        final_dir = destination(settings, source)
-        posts, _ = candidates.parse_files(
-            downloaded,
-            source["name"],
-            final_path=lambda path: final_dir / path.relative_to(download_dir),
-        )
-        posts_found = candidates.record_posts(conn, posts, run_id)
+    # Record the posts downloaded (author and subreddit, from the file names) for candidates and the Latest page.
+    # Parse before any move below, while the files certainly exist, but record where they will end up.
+    final_dir = destination(settings, source)
+    posts, _ = candidates.parse_files(
+        downloaded,
+        source["name"] if source["kind"] == "subreddit" else None,
+        final_path=lambda path: final_dir / path.relative_to(download_dir),
+        author=source["name"] if source["kind"] == "user" else None,
+    )
     if settings["staging_root"]:
         files_new, files_skipped = move_staged(download_dir, destination(settings, source))
     else:
         files_new, files_skipped = len(downloaded), 0
+    # Recorded only now the files are in place, so nothing (e.g. the Latest page) asks for a file still in staging
+    posts_found = candidates.record_posts(conn, posts, run_id)
     # A source that yielded nothing (no new posts, or a deleted account) shouldn't leave an empty folder behind
     remove_empty_dirs(download_dir)
     status = "ok" if exit_code == 0 else "failed"
 
     conn.execute(
         "UPDATE runs SET finished_at = ?, exit_code = ?, status = ?, files_new = ?, files_skipped = ?, "
-        "posts_found = ?, output_tail = ? WHERE id = ?;",
-        (_now(), exit_code, status, files_new, files_skipped, posts_found, _tail(output), run_id),
+        "posts_found = ?, output_tail = ?, trigger = ?, files_failed = ?, files_retry = ? WHERE id = ?;",
+        (
+            _now(),
+            exit_code,
+            status,
+            files_new,
+            files_skipped,
+            posts_found,
+            _tail(output),
+            trigger,
+            len(_FILE_FAILED.findall(output)),
+            len(_FILE_RETRY.findall(output)),
+            run_id,
+        ),
     )
     conn.execute(
         "UPDATE sources SET last_run_at = ?, last_status = ?, last_files = ?, "
@@ -378,6 +464,7 @@ def run_source(
                     "UPDATE sources SET status = ?, note = ? WHERE id = ?;",
                     (new_status, deactivated, source["id"]),
                 )
+                conn.execute("UPDATE runs SET deactivated = ? WHERE id = ?;", (deactivated, run_id))
                 break
     conn.commit()
     return {**service.get_run(conn, run_id), "deactivated": deactivated}
@@ -441,6 +528,8 @@ def run_one(
     *,
     sort_override: Optional[str] = None,
     time_override: Optional[str] = None,
+    on_start: Optional[Callable[[int], None]] = None,
+    trigger: str = "cli",
 ) -> dict:
     """Download one active source now, alongside any batch run; only the same source running already blocks it"""
     settings = service.get_settings(conn)
@@ -454,4 +543,71 @@ def run_one(
     files = rule_files(directory, rules)
     write_rule_files(files, rules)
     with source_lock(directory, source):
-        return run_source(conn, source, settings, rules, files, sort_override, time_override)
+        return run_source(conn, source, settings, rules, files, sort_override, time_override, on_start, trigger)
+
+
+def source_is_busy(directory: Path, source: dict) -> bool:
+    """Whether some process is downloading this source right now (it holds the source's lock)"""
+    try:
+        with source_lock(directory, source):
+            return False
+    except RunLockedError:
+        return True
+
+
+def recover(conn: sqlite3.Connection, progress: Callable[[str], None] = logger.info) -> dict:
+    """Tidy up after downloads that were cut off (the manager was stopped, crashed, or the machine lost power).
+
+    For every source nothing is downloading now:
+    - runs still marked running are marked failed, with a note in their log
+    - files left in its staging folder are moved into the archive (bdfrx has already recorded those posts as done,
+      so they would otherwise never arrive), recording subreddit posts as a normal run would
+    Sources being downloaded by a live process (e.g. 'bdfrx-manager run' in a terminal) are left alone.
+    """
+    settings = service.get_settings(conn)
+    directory = log_dir(settings)
+    report = {"runs_closed": 0, "files_recovered": 0, "files_already_there": 0}
+    sources = {s["id"]: s for s in service.list_sources(conn)}
+
+    for run in conn.execute("SELECT * FROM runs WHERE status = 'running';").fetchall():
+        source = sources.get(run["source_id"])
+        if source is not None and source_is_busy(directory, source):
+            continue
+        note = "[manager] interrupted: the manager stopped while this ran; its download was queued again if queued"
+        if run["log_path"] and Path(run["log_path"]).exists():
+            with Path(run["log_path"]).open("a") as log_file:
+                log_file.write(f"\n{note}\n")
+        conn.execute(
+            "UPDATE runs SET status = 'failed', finished_at = ?, output_tail = COALESCE(output_tail, '') || ? "
+            "WHERE id = ?;",
+            (_now(), f"\n{note}", run["id"]),
+        )
+        conn.commit()
+        report["runs_closed"] += 1
+        progress(f"closed interrupted run {run['id']} ({run['source_kind']} {run['source_name']})")
+
+    staging_root = settings["staging_root"]
+    if staging_root and Path(staging_root).expanduser().is_dir():
+        for source in sources.values():
+            staged = download_directory(settings, source)
+            if not staged.is_dir() or source_is_busy(directory, source):
+                continue
+            leftovers = _files_in(staged)
+            if not leftovers:
+                remove_empty_dirs(staged)
+                continue
+            with source_lock(directory, source):
+                final_dir = destination(settings, source)
+                posts, _ = candidates.parse_files(
+                    leftovers,
+                    source["name"] if source["kind"] == "subreddit" else None,
+                    final_path=lambda path, final_dir=final_dir, staged=staged: final_dir / path.relative_to(staged),
+                    author=source["name"] if source["kind"] == "user" else None,
+                )
+                candidates.record_posts(conn, posts)
+                moved, skipped = move_staged(staged, destination(settings, source))
+                remove_empty_dirs(staged)
+            report["files_recovered"] += moved
+            report["files_already_there"] += skipped
+            progress(f"moved {moved} file(s) left in staging for {source['kind']} {source['name']} into the archive")
+    return report

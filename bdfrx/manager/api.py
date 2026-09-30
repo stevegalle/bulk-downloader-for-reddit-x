@@ -1,9 +1,9 @@
 """HTTP API over the manager service. Requires the 'manager' extra (fastapi, uvicorn)."""
 
-import queue
+import contextlib
+import logging
 import secrets
 import sqlite3
-import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Union
@@ -14,7 +14,10 @@ from fastapi.security import APIKeyCookie, APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from bdfrx.manager import candidates, db, runner, service, setaside
+from bdfrx.manager import candidates, db, insights, jobs, runner, service, setaside, thumbs
+from bdfrx.manager.jobs import DownloadQueue, schedule_due_at
+
+logger = logging.getLogger(__name__)
 
 SourceKind = Literal["user", "subreddit"]
 SourceStatus = Literal["active", "paused", "banned"]
@@ -40,6 +43,7 @@ class SourceFields(BaseModel):
 class SourceCreate(SourceFields):
     kind: SourceKind
     name: str
+    download: bool = Field(False, description="Also download their posts now, over follow_download_time")
 
 
 class RuleCreate(BaseModel):
@@ -64,73 +68,28 @@ class RunRequest(BaseModel):
 
 
 PUBLIC_PATHS = frozenset(("/",))
+
+
+class UIFiles(StaticFiles):
+    """The web UI's files, which browsers must re-check on every load so an updated UI is picked up at once
+    (an unchanged file costs a 304 Not Modified)"""
+
+    def file_response(self, *args, **kwargs) -> Response:  # noqa: ANN002, ANN003
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 UI_DIR = Path(__file__).parent / "ui"
 # Browsers can't add headers to <img>/<video> requests, so the UI also puts the key in this cookie
 KEY_COOKIE = "bdfrx_manager_key"
 
 
-class DownloadQueue:
-    """Downloads of single sources requested through the API (e.g. on follow), one at a time in a worker thread.
-
-    They run alongside scheduled runs; per-source locks keep the same source from running twice. The worker checks
-    each job's source is still there and active when it starts, so undoing a follow drops its queued download.
-    """
-
-    def __init__(self, db_path: Optional[Union[str, Path]]) -> None:
-        self.db_path = db_path
-        self.jobs: queue.Queue = queue.Queue()
-        self.lock = threading.Lock()
-        self.pending: list[dict] = []
-        self.current: Optional[dict] = None
-        self.last: Optional[dict] = None
-        self.thread: Optional[threading.Thread] = None
-
-    def add(self, kind: str, name: str, time: Optional[str] = None) -> str:
-        job = {"kind": kind, "name": name, "time": time}
-        key = (kind, name.lower())
-        with self.lock:
-            active = [*self.pending, *([self.current] if self.current else [])]
-            if any((j["kind"], j["name"].lower()) == key for j in active):
-                return "already queued"
-            self.pending.append(job)
-            self.jobs.put(job)
-            if self.thread is None or not self.thread.is_alive():
-                self.thread = threading.Thread(target=self._work, name="bdfrx-manager-downloads", daemon=True)
-                self.thread.start()
-        return "queued"
-
-    def snapshot(self) -> dict:
-        with self.lock:
-            return {"current": self.current, "pending": list(self.pending), "last": self.last}
-
-    def _work(self) -> None:
-        while True:
-            job = self.jobs.get()
-            with self.lock:
-                self.pending.remove(job)
-                self.current = job
-            outcome = {**job}
-            conn = db.connect(self.db_path)
-            try:
-                run = runner.run_one(conn, job["kind"], job["name"], time_override=job["time"])
-                outcome.update(run_id=run["id"], status=run["status"], files_new=run["files_new"])
-                if run["deactivated"]:
-                    outcome.update(status="deactivated", reason=run["deactivated"])
-            except service.ManagerError as e:  # unfollowed, paused, ignored, or already downloading
-                outcome.update(status="skipped", reason=str(e))
-            except Exception as e:  # noqa: BLE001 - keep the worker alive whatever one job does
-                outcome.update(status="failed", reason=str(e))
-            finally:
-                conn.close()
-                with self.lock:
-                    self.current = None
-                    self.last = outcome
-                self.jobs.task_done()
-
-
 def create_app(  # noqa: PLR0915
     db_path: Optional[Union[str, Path]] = None,
     api_key: Optional[str] = None,
+    *,
+    schedule: bool = True,
 ) -> FastAPI:
     """The API app. With api_key set, every endpoint requires it, in an X-API-Key header or the key cookie."""
     key_header = APIKeyHeader(name="X-API-Key", auto_error=False, description="Required when the server has a key")
@@ -149,9 +108,11 @@ def create_app(  # noqa: PLR0915
             raise HTTPException(401, "Missing or wrong X-API-Key header")
 
     app = FastAPI(title="bdfrx manager", version="1", dependencies=[Depends(check_key)])
-    downloads = DownloadQueue(db_path)
+    # Recovery from any interrupted downloads runs first, then the (persistent) queue and the schedule start
+    downloads = DownloadQueue(db_path, start=False)
     app.state.downloads = downloads
-    run_thread: dict[str, Optional[threading.Thread]] = {"thread": None}
+    app.state.startup = jobs.start_server_background(downloads, db_path, schedule=schedule)
+    app.router.on_shutdown.append(downloads.stop)
 
     def get_conn() -> Iterator[sqlite3.Connection]:
         conn = db.connect(db_path)
@@ -176,15 +137,20 @@ def create_app(  # noqa: PLR0915
         return RedirectResponse("/ui/")
 
     # The web UI is static files; it asks for the key itself, so it loads without one (mounts skip check_key)
-    app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
+    app.mount("/ui", UIFiles(directory=UI_DIR, html=True), name="ui")
 
     @app.get("/status")
     def get_status(conn: Conn) -> dict:
-        thread = run_thread["thread"]
+        due_at = schedule_due_at(conn)
         return {
             **service.summary(conn),
-            "run_in_progress": bool(thread and thread.is_alive()),
+            "run_in_progress": downloads.busy(),
             "downloads": downloads.snapshot(),
+            "schedule": {
+                "every_hours": float(service.get_settings(conn)["run_every_hours"]),
+                "last_at": service.get_state(conn, "last_scheduled_at"),
+                "next_at": due_at.strftime("%Y-%m-%d %H:%M:%S") if due_at else None,
+            },
         }
 
     # Sources
@@ -200,15 +166,21 @@ def create_app(  # noqa: PLR0915
 
     @app.post("/sources", status_code=201)
     def add_source(body: SourceCreate, conn: Conn) -> dict:
-        fields = body.model_dump(exclude={"kind", "name"}, exclude_none=True)
-        return service.add_source(conn, body.kind, body.name, **fields)
+        fields = body.model_dump(exclude={"kind", "name", "download"}, exclude_none=True)
+        source = service.add_source(conn, body.kind, body.name, **fields)
+        queued = None
+        if body.download and source["status"] == "active":
+            time_window = service.get_settings(conn)["follow_download_time"]
+            queued = downloads.add(body.kind, source["name"], time_window, trigger="added")
+        return {**source, "download": queued}
 
     @app.get("/sources/{kind}/{name}")
     def get_source(kind: SourceKind, name: str, conn: Conn) -> dict:
         source = service.get_source(conn, kind, name)
         settings = service.get_settings(conn)
+        stats = next(s for s in service.list_sources(conn, kind, search=source["name"]) if s["id"] == source["id"])
         return {
-            **source,
+            **stats,
             "effective_options": runner.effective_options(settings, source),
             "destination": str(runner.destination(settings, source)),
         }
@@ -227,12 +199,46 @@ def create_app(  # noqa: PLR0915
     def download_source(kind: SourceKind, name: str, conn: Conn, time: Optional[Time] = None) -> dict:
         """Download one source now, in the background, alongside any scheduled run"""
         source = service.get_source(conn, kind, name)
-        return {"download": downloads.add(kind, source["name"], time)}
+        return {"download": downloads.add(kind, source["name"], time, trigger="manual")}
+
+    @app.get("/sources/{kind}/{name}/thumbnail", response_class=FileResponse)
+    def source_thumbnail(kind: SourceKind, name: str, conn: Conn) -> FileResponse:
+        """A small preview of a random image or video from the source's archive folder; different each time"""
+        source = service.get_source(conn, kind, name)
+        settings = service.get_settings(conn)
+        found = thumbs.random_thumbnail(runner.destination(settings, source), runner.log_dir(settings) / "thumbs")
+        if found is None:
+            raise HTTPException(
+                404,
+                "No images or videos to preview" if thumbs.ffmpeg_available() else "ffmpeg is missing",
+            )
+        return FileResponse(found, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.get("/downloads")
-    def list_downloads() -> dict:
-        """The on-demand download queue: what is downloading, what is waiting, and how the last one went"""
-        return downloads.snapshot()
+    def list_downloads(conn: Conn) -> dict:
+        """The download queue: what is running (with files so far), what is waiting, and recent results"""
+        state = downloads.snapshot()
+        settings = service.get_settings(conn)
+        for job in state["running"]:
+            with contextlib.suppress(service.ManagerError):
+                folder = runner.download_directory(settings, service.get_source(conn, job["kind"], job["name"]))
+                job["files_so_far"] = (
+                    sum(1 for p in folder.rglob("*") if p.is_file()) if settings["staging_root"] else None
+                )
+        state["slots"] = int(settings["max_concurrent_downloads"])
+        return state
+
+    @app.delete("/downloads/{job_id}")
+    def cancel_download(job_id: int) -> dict:
+        """Cancel a waiting download (one already running finishes)"""
+        if not downloads.cancel(job_id):
+            raise HTTPException(404, "No waiting download with that id (it may have started already)")
+        return {"cancelled": 1}
+
+    @app.delete("/downloads")
+    def cancel_all_downloads() -> dict:
+        """Cancel every waiting download"""
+        return {"cancelled": downloads.cancel()}
 
     @app.delete("/sources/{kind}/{name}", status_code=204)
     def remove_source(kind: SourceKind, name: str, conn: Conn) -> None:
@@ -286,7 +292,12 @@ def create_app(  # noqa: PLR0915
         source = candidates.promote(conn, name)
         queued = None
         if download:
-            queued = downloads.add("user", source["name"], service.get_settings(conn)["follow_download_time"])
+            queued = downloads.add(
+                "user",
+                source["name"],
+                service.get_settings(conn)["follow_download_time"],
+                trigger="follow",
+            )
         return {**source, "download": queued}
 
     @app.get("/candidates/dismissed")
@@ -326,6 +337,18 @@ def create_app(  # noqa: PLR0915
 
     # Post files
 
+    @app.get("/posts/{post_id}/files/{index}/thumbnail", response_class=FileResponse)
+    def post_file_thumbnail(post_id: str, index: int, conn: Conn) -> FileResponse:
+        """A small JPEG preview of a post's image or video file"""
+        path = candidates.post_file_path(conn, post_id, index)
+        if not path.is_file():
+            raise HTTPException(404, f"File no longer at {path.name}")
+        try:
+            found = thumbs.thumbnail(path, runner.log_dir(service.get_settings(conn)) / "thumbs")
+        except thumbs.ThumbnailError as e:
+            raise HTTPException(404, str(e))
+        return FileResponse(found, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
+
     @app.get("/posts/{post_id}/files/{index}", response_class=FileResponse)
     def post_file(post_id: str, index: int, conn: Conn) -> FileResponse:
         """A recorded file of a post. Supports range requests, so videos can seek."""
@@ -359,14 +382,62 @@ def create_app(  # noqa: PLR0915
     # Runs
 
     @app.get("/runs")
-    def list_runs(
+    def list_runs(  # noqa: PLR0913
         conn: Conn,
         limit: int = Query(50, ge=1, le=1000),
         kind: Optional[SourceKind] = None,
         name: Optional[str] = None,
         status: Optional[Literal["running", "ok", "failed"]] = None,
+        trigger: Optional[str] = Query(None, description="schedule, follow, added, manual, run-all, cli, or unknown"),
+        since: Optional[str] = Query(None, description="24h, 7d, 30d, or YYYY-MM-DD"),
+        before_id: Optional[int] = Query(None, description="Page back: only runs older than this id"),
+        search: Optional[str] = Query(None, description="Only sources whose name contains this"),
     ) -> list[dict]:
-        return service.list_runs(conn, limit, kind, name, status)
+        since_ts = candidates.since_to_timestamp(since) if since else None
+        return service.list_runs(conn, limit, kind, name, status, trigger, since_ts, before_id, search)
+
+    @app.get("/runs/stats")
+    def run_stats(conn: Conn, days: int = Query(30, ge=1, le=365)) -> dict:
+        """Totals for the last day and week, runs and new files per day, and how much the run logs take"""
+        return {**insights.run_stats(conn, days), "logs": insights.log_usage(service.get_settings(conn))}
+
+    @app.get("/runs/attention")
+    def run_attention(conn: Conn) -> dict:
+        """Sources failing repeatedly, failed and interrupted runs, files that couldn't be fetched, deactivations"""
+        return insights.attention(conn)
+
+    @app.post("/runs/{run_id}/again", status_code=202)
+    def run_again(run_id: int, conn: Conn) -> dict:
+        """Queue the run's source again, with the same time window"""
+        run = service.get_run(conn, run_id)
+        source = service.get_source(conn, run["source_kind"], run["source_name"])
+        time_window = insights.run_time_window(run)
+        return {
+            "download": downloads.add(source["kind"], source["name"], time_window, trigger="manual"),
+            "time": time_window,
+        }
+
+    # Latest downloads
+
+    @app.get("/feed")
+    def latest(
+        conn: Conn,
+        limit: int = Query(30, ge=1, le=200),
+        before: Optional[int] = Query(None, description="The cursor of the last post of the previous page"),
+        kind: Optional[SourceKind] = None,
+        name: Optional[str] = None,
+    ) -> list[dict]:
+        """Posts downloaded by runs, newest first, each file with a url"""
+        posts = insights.feed(conn, limit, before, kind, name)
+        for post in posts:
+            for file in post["files"]:
+                file["url"] = f"/posts/{post['post_id']}/files/{file['index']}"
+        return posts
+
+    @app.get("/sources/user/{name}/subreddits")
+    def user_subreddits(name: str, conn: Conn) -> list[dict]:
+        """Subreddits a user posts in (from recorded posts), and whether you follow or skip each"""
+        return insights.author_subreddits(conn, service.get_source(conn, "user", name)["name"])
 
     @app.get("/runs/{run_id}")
     def get_run(run_id: int, conn: Conn) -> dict:
@@ -382,24 +453,10 @@ def create_app(  # noqa: PLR0915
 
     @app.post("/runs", status_code=202)
     def start_run(body: RunRequest, conn: Conn) -> Union[dict, list[dict]]:
-        """Start a run in the background (or return the planned commands for a dry run)"""
+        """Queue every selected active source, least recently run first (or return the planned commands for a dry
+        run). Queued downloads run max_concurrent_downloads at a time."""
         if body.dry_run:
             return runner.run(conn, body.kinds, body.names, body.sort, dry_run=True)
-        thread = run_thread["thread"]
-        if (thread and thread.is_alive()) or runner.is_locked(runner.log_dir(service.get_settings(conn))):
-            raise HTTPException(409, "A run is already in progress")
-
-        def background() -> None:
-            run_conn = db.connect(db_path)
-            try:
-                runner.run(run_conn, body.kinds, body.names, body.sort)
-            except runner.RunLockedError:
-                pass
-            finally:
-                run_conn.close()
-
-        run_thread["thread"] = threading.Thread(target=background, name="bdfrx-manager-run", daemon=True)
-        run_thread["thread"].start()
-        return {"started": True}
+        return downloads.queue_sources(conn, runner.select_sources(conn, body.kinds, body.names), trigger="run-all")
 
     return app

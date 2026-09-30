@@ -1,159 +1,42 @@
 // bdfrx manager web UI. Plain ES modules, no dependencies; talks to the API on the same server.
+// This file: tabs, the Candidates page and the full-screen viewer. Shared helpers are in lib.js, the download queue in
+// activity.js, the Sources page in sources.js.
 
-const KEY_STORAGE = "bdfrx_manager_key";
-const KEY_COOKIE = "bdfrx_manager_key";
+import { refresh as refreshDownloads } from "./activity.js";
+import {
+  $,
+  api,
+  askForKey,
+  confirmIgnore,
+  h,
+  ignoreMessage,
+  ignoreUser,
+  number,
+  setKey,
+  storage,
+  timeAgo,
+  toast,
+  unignoreUser,
+} from "./lib.js";
+import { showLatest } from "./latest.js";
+import { showRuns } from "./runs.js";
+import { showSources } from "./sources.js";
+import { openViewer, setUpViewer, viewerItems } from "./viewer.js";
+
 const FILTER_STORAGE = "bdfrx_manager_candidate_filters";
-const SET_ASIDE_STORAGE = "bdfrx_manager_set_aside_on_ignore";
 const PAGE_SIZE = 20;
 const PREVIEW_POSTS = 8;
 
-const $ = (selector, root = document) => root.querySelector(selector);
-
-// Build an element: h("a", {href: "#", class: "x"}, "text", childElement). Text is never parsed as HTML.
-function h(tag, attrs = {}, ...children) {
-  const el = document.createElement(tag);
-  for (const [name, value] of Object.entries(attrs)) {
-    if (value === undefined || value === null || value === false) continue;
-    if (name.startsWith("on")) el.addEventListener(name.slice(2), value);
-    else if (value === true) el.setAttribute(name, "");
-    else el.setAttribute(name, value);
-  }
-  el.append(...children.flat().filter((child) => child !== null && child !== undefined && child !== false));
-  return el;
-}
-
-function storage(action, key, value) {
-  // localStorage can be unavailable (private windows, blocked site data); the UI still works, it just forgets
-  try {
-    if (action === "get") return localStorage.getItem(key);
-    if (action === "set") localStorage.setItem(key, value);
-    if (action === "remove") localStorage.removeItem(key);
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-// API key: sent as a header on fetches, and mirrored into a cookie so <img>/<video> requests carry it too
-
-function getKey() {
-  return storage("get", KEY_STORAGE) || "";
-}
-
-function setKey(key) {
-  if (key) {
-    storage("set", KEY_STORAGE, key);
-    document.cookie = `${KEY_COOKIE}=${encodeURIComponent(key)}; path=/; max-age=31536000; SameSite=Strict`;
-  } else {
-    storage("remove", KEY_STORAGE);
-    document.cookie = `${KEY_COOKIE}=; path=/; max-age=0; SameSite=Strict`;
-  }
-}
-
-// Re-assert the cookie on every load, in case it expired or was cleared while localStorage kept the key
-if (getKey()) setKey(getKey());
-
-let keyPrompt = null;
-
-function askForKey(message) {
-  if (keyPrompt) return keyPrompt;
-  const dialog = $("#key-dialog");
-  $("#key-message").textContent = message;
-  const input = $("#key-form input[name=key]");
-  input.value = "";
-  dialog.returnValue = "";
-  keyPrompt = new Promise((resolve) => {
-    dialog.addEventListener(
-      "close",
-      () => {
-        keyPrompt = null;
-        if (dialog.returnValue !== "cancel" && input.value.trim()) setKey(input.value.trim());
-        resolve();
-      },
-      { once: true },
-    );
-  });
-  dialog.showModal();
-  input.focus();
-  return keyPrompt;
-}
-
-class ApiError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
-
-async function api(path, { method = "GET", body, retry = true } = {}) {
-  const headers = {};
-  const key = getKey();
-  if (key) headers["X-API-Key"] = key;
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-  if (response.status === 401 && retry) {
-    await askForKey(key ? "That key was not accepted. Paste the key from api.env on the server." : "This server needs its API key. It is in api.env on the server.");
-    return api(path, { method, body, retry: false });
-  }
-  if (!response.ok) {
-    let message = await response.text();
-    try {
-      const detail = JSON.parse(message).detail;
-      message = typeof detail === "string" ? detail : detail.map((d) => d.msg).join("; ");
-    } catch {
-      // plain-text error body
-    }
-    throw new ApiError(response.status, message || response.statusText);
-  }
-  if (response.status === 204) return null;
-  const type = response.headers.get("content-type") || "";
-  return type.includes("application/json") ? response.json() : response.text();
-}
-
-// Toasts, optionally with an undo button
-
-function toast(message, { error = false, undo } = {}) {
-  const el = h("div", { class: error ? "toast error" : "toast", role: error ? "alert" : "status" }, h("span", {}, message));
-  let timer;
-  const close = () => {
-    clearTimeout(timer);
-    el.remove();
-  };
-  if (undo) {
-    el.append(
-      h("button", { type: "button", onclick: async () => {
-        close();
-        try {
-          await undo();
-        } catch (e) {
-          toast(`Undo failed: ${e.message}`, { error: true });
-        }
-      } }, "Undo"),
-    );
-  }
-  $("#toasts").append(el);
-  timer = setTimeout(close, undo ? 7000 : error ? 8000 : 3500);
-}
-
-// Formatting
-
-function timeAgo(timestamp) {
-  if (!timestamp) return "unknown";
-  const then = new Date(`${timestamp.replace(" ", "T")}Z`);
-  const days = Math.floor((Date.now() - then) / 86_400_000);
-  if (days < 1) return "today";
-  if (days === 1) return "yesterday";
-  if (days < 45) return `${days} days ago`;
-  if (days < 540) return `${Math.round(days / 30)} months ago`;
-  return `${(days / 365).toFixed(1)} years ago`;
-}
-
-const number = (n) => (n ?? 0).toLocaleString();
-
 // Tabs
 
-const VIEWS = { candidates: { title: "Candidates", show: showCandidates } };
-const TAB_TITLES = { sources: "Sources", runs: "Runs", rules: "Rules", settings: "Settings" };
+const VIEWS = {
+  candidates: { title: "Candidates", show: showCandidates },
+  sources: { title: "Sources", show: () => showSources(true), hide: () => showSources(false) },
+  latest: { title: "Latest", show: () => showLatest(true), hide: () => showLatest(false) },
+  runs: { title: "Runs", show: () => showRuns(true), hide: () => showRuns(false) },
+};
+const TAB_TITLES = { rules: "Rules", settings: "Settings" };
+let currentTab = null;
 
 function route() {
   const tab = location.hash.slice(1) || "candidates";
@@ -162,6 +45,8 @@ function route() {
     else link.removeAttribute("aria-current");
   }
   for (const view of document.querySelectorAll(".view")) view.hidden = true;
+  if (currentTab && currentTab !== tab && VIEWS[currentTab]?.hide) VIEWS[currentTab].hide();
+  currentTab = tab;
   if (VIEWS[tab]) {
     $(`#view-${tab}`).hidden = false;
     document.title = `${VIEWS[tab].title} · bdfrx manager`;
@@ -303,7 +188,7 @@ const ACTIONS = {
   follow: {
     run: async (name) => {
       const result = await api(`/candidates/${encodeURIComponent(name)}/promote?download=true`, { method: "POST" });
-      if (result.download) watchDownloads();
+      if (result.download) refreshDownloads();
       return result;
     },
     // Removing the source also drops its download if it hasn't started (the worker re-checks before starting)
@@ -318,48 +203,11 @@ const ACTIONS = {
   ignore: {
     // Asks first, and can also move their files aside; returns what to say and how to undo
     confirm: confirmIgnore,
-    run: async (name, { setAside }) => {
-      await api("/rules", { method: "POST", body: { kind: "ignore_user", value: name } });
-      if (!setAside) return { moved: 0, skipped: [] };
-      return api(`/set-aside/${encodeURIComponent(name)}`, { method: "POST" });
-    },
-    undo: async (name, { setAside }) => {
-      if (setAside) await api(`/set-aside/${encodeURIComponent(name)}`, { method: "DELETE" });
-      await api(`/rules/ignore_user/${encodeURIComponent(name)}`, { method: "DELETE" });
-    },
-    message: (name, result) => {
-      if (!result || !result.moved) return `Ignoring u/${name} everywhere`;
-      const skipped = result.skipped.length ? `, ${result.skipped.length} skipped` : "";
-      return `Ignoring u/${name} · moved ${number(result.moved)} file${result.moved === 1 ? "" : "s"} aside${skipped}`;
-    },
+    run: ignoreUser,
+    undo: unignoreUser,
+    message: ignoreMessage,
   },
 };
-
-async function confirmIgnore(name) {
-  const dialog = $("#ignore-dialog");
-  const box = $("#ignore-set-aside");
-  const label = $("#ignore-set-aside-label");
-  $("#ignore-title").textContent = `Ignore u/${name}?`;
-  box.checked = storage("get", SET_ASIDE_STORAGE) === "1";
-  box.disabled = true;
-  label.textContent = "Also move their downloaded files aside for review (counting…)";
-  api(`/set-aside/${encodeURIComponent(name)}`)
-    .then(({ files }) => {
-      box.disabled = files === 0;
-      if (files === 0) box.checked = false;
-      label.textContent = files
-        ? `Also move their ${number(files)} downloaded file${files === 1 ? "" : "s"} to the archive's ignored/${name} folder, to review and delete by hand`
-        : "No downloaded files of theirs to move";
-    })
-    .catch((e) => { label.textContent = `Could not count their files: ${e.message}`; });
-  dialog.returnValue = "";
-  dialog.showModal();
-  await new Promise((resolve) => dialog.addEventListener("close", resolve, { once: true }));
-  if (dialog.returnValue !== "ignore") return null;
-  const setAside = box.checked && !box.disabled;
-  if (!box.disabled) storage("set", SET_ASIDE_STORAGE, box.checked ? "1" : "0");
-  return { setAside };
-}
 
 async function act(card, action) {
   const name = card.dataset.name;
@@ -392,48 +240,6 @@ async function act(card, action) {
   });
 }
 
-// Background downloads (started by following someone): a status pill while any are queued or running
-
-let downloadTimer = null;
-let lastReported = null;
-
-function describeJob(job) {
-  return `${job.kind === "user" ? "u/" : "r/"}${job.name}`;
-}
-
-async function watchDownloads() {
-  clearTimeout(downloadTimer);
-  let state;
-  try {
-    state = await api("/downloads");
-  } catch {
-    downloadTimer = setTimeout(watchDownloads, 10000);
-    return;
-  }
-  const pill = $("#activity");
-  const busy = state.current || state.pending.length;
-  if (busy) {
-    const now = state.current ? `Downloading ${describeJob(state.current)}` : "Starting downloads";
-    const waiting = state.pending.length ? ` · ${state.pending.length} queued` : "";
-    pill.textContent = now + waiting;
-    pill.title = [state.current, ...state.pending].filter(Boolean).map(describeJob).join(", ");
-    pill.hidden = false;
-  } else {
-    pill.hidden = true;
-  }
-  // Report each finished download once
-  const last = state.last;
-  const key = last && `${last.kind}/${last.name}/${last.run_id ?? last.reason}`;
-  if (last && lastReported !== null && key !== lastReported) {
-    if (last.status === "ok") toast(`${describeJob(last)}: ${number(last.files_new)} new file${last.files_new === 1 ? "" : "s"}`);
-    else if (last.status === "deactivated") toast(`${describeJob(last)} deactivated: ${last.reason}`, { error: true });
-    else if (last.status === "skipped") toast(`${describeJob(last)}: download skipped (${last.reason})`);
-    else toast(`${describeJob(last)}: download failed${last.reason ? ` (${last.reason})` : ""}. See the run's log.`, { error: true });
-  }
-  lastReported = key ?? lastReported ?? "";
-  if (busy) downloadTimer = setTimeout(watchDownloads, 4000);
-}
-
 // Previews
 
 async function loadPreviews(strip) {
@@ -460,17 +266,15 @@ async function loadPreviews(strip) {
   strip.replaceChildren(...tiles);
 }
 
-function viewerItems(posts) {
-  return posts.flatMap((post) => post.files.map((file) => ({ post, file })));
-}
 
 function previewTile({ post, file }, onclick) {
   const tile = h("button", { type: "button", class: "tile", title: `r/${post.subreddit} · ${timeAgo(post.posted_at)}`, onclick });
-  if (file.kind === "image") {
-    tile.append(h("img", { src: file.url, loading: "lazy", alt: "", decoding: "async" }));
-  } else if (file.kind === "video") {
-    // #t= makes browsers show a frame from just past the start instead of a blank box
-    tile.append(h("video", { src: `${file.url}#t=0.5`, preload: "metadata", muted: true, playsinline: true }), h("span", { class: "play" }, "▶"));
+  if (file.kind === "image" || file.kind === "video") {
+    // Small server-made previews; the viewer loads the full file
+    const img = h("img", { src: `${file.url}/thumbnail`, loading: "lazy", alt: "", decoding: "async" });
+    img.addEventListener("error", () => img.replaceWith(h("span", { class: "label" }, h("span", { class: "icon" }, "▢"), "No preview")), { once: true });
+    tile.append(img);
+    if (file.kind === "video") tile.append(h("span", { class: "play" }, "▶"));
   } else if (file.kind === "audio") {
     tile.append(h("span", { class: "label" }, h("span", { class: "icon" }, "♪"), "Audio"));
   } else if (file.kind === "text") {
@@ -485,84 +289,6 @@ function previewTile({ post, file }, onclick) {
   }
   if (post.files.length > 1) tile.append(h("span", { class: "badge" }, `1/${post.files.length}`));
   return tile;
-}
-
-// Full-screen viewer
-
-const viewer = { items: [], index: 0 };
-
-function openViewer(items, index) {
-  viewer.items = items;
-  viewer.index = index;
-  renderViewer();
-  const dialog = $("#viewer");
-  if (!dialog.open) dialog.showModal();
-}
-
-function renderViewer() {
-  const { post, file } = viewer.items[viewer.index];
-  const stage = $("#viewer-stage");
-  let content;
-  if (file.kind === "image") content = h("img", { src: file.url, alt: file.name });
-  else if (file.kind === "video") content = h("video", { src: file.url, controls: true, autoplay: true, playsinline: true, loop: true });
-  else if (file.kind === "audio") content = h("audio", { src: file.url, controls: true, autoplay: true });
-  else if (file.kind === "text") {
-    content = h("pre", {}, "Loading…");
-    fetch(file.url, { headers: { Range: "bytes=0-100000" } })
-      .then((r) => r.text())
-      .then((text) => { content.textContent = text; })
-      .catch((e) => { content.textContent = `Could not load: ${e.message}`; });
-  } else content = h("a", { href: file.url, target: "_blank" }, `Open ${file.name}`);
-  stage.replaceChildren(content);
-
-  const gallery = post.files.length > 1 ? ` · image ${file.index + 1} of ${post.files.length}` : "";
-  $("#viewer-info").replaceChildren(
-    h("a", { href: `https://www.reddit.com/comments/${post.post_id}/`, target: "_blank", rel: "noopener noreferrer" }, `r/${post.subreddit}`),
-    ` · score ${number(post.score)} · ${timeAgo(post.posted_at)}${gallery}`,
-  );
-  $("#viewer-count").textContent = `${viewer.index + 1} / ${viewer.items.length}`;
-  $("#viewer-prev").disabled = viewer.index === 0;
-  $("#viewer-next").disabled = viewer.index === viewer.items.length - 1;
-}
-
-function stepViewer(delta) {
-  const index = viewer.index + delta;
-  if (index < 0 || index >= viewer.items.length) return;
-  viewer.index = index;
-  renderViewer();
-}
-
-function closeViewer() {
-  const dialog = $("#viewer");
-  $("#viewer-stage").replaceChildren(); // stops any playing media
-  if (dialog.open) dialog.close();
-}
-
-function setUpViewer() {
-  const dialog = $("#viewer");
-  $("#viewer-prev").addEventListener("click", () => stepViewer(-1));
-  $("#viewer-next").addEventListener("click", () => stepViewer(1));
-  $("#viewer-close").addEventListener("click", closeViewer);
-  dialog.addEventListener("close", () => $("#viewer-stage").replaceChildren());
-  dialog.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowLeft") stepViewer(-1);
-    if (event.key === "ArrowRight") stepViewer(1);
-  });
-  // Swipe left/right on touch screens
-  let startX = null;
-  let startY = null;
-  const stage = $("#viewer-stage");
-  stage.addEventListener("touchstart", (event) => {
-    startX = event.touches[0].clientX;
-    startY = event.touches[0].clientY;
-  }, { passive: true });
-  stage.addEventListener("touchend", (event) => {
-    if (startX === null) return;
-    const dx = event.changedTouches[0].clientX - startX;
-    const dy = event.changedTouches[0].clientY - startY;
-    startX = null;
-    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) stepViewer(dx < 0 ? 1 : -1);
-  });
 }
 
 // Start
@@ -581,6 +307,6 @@ function setUpKeyDialog() {
 
 setUpKeyDialog();
 setUpViewer();
-watchDownloads(); // picks up downloads already running, e.g. started from another device
+refreshDownloads(); // picks up downloads already running, e.g. started from another device or by the schedule
 window.addEventListener("hashchange", route);
 route();

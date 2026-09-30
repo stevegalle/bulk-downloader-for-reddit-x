@@ -181,6 +181,45 @@ Example crontab, every six hours:
 0 */6 * * * /home/steve/bdfrx/bin/bdfrx-manager run >> /home/steve/.config/bdfrx/manager/cron.log 2>&1
 ```
 
+## Concurrency, the queue and the schedule
+
+At most `max_concurrent_downloads` bdfrx downloads (default 2) run at once, counted across every process: the API
+server, `bdfrx-manager run` in a terminal, anything. Each download holds one of that many slot lock files in
+`log_dir/slots/` and waits for one to be free. Every download is on one Reddit account, so keep this small.
+
+The API server runs a queue that everything started from the web UI or API goes through: Download now, following a
+candidate, adding a source with "download history now", Run all active, and the schedule. Waiting entries can be
+cancelled (`DELETE /downloads/{id}`, or `DELETE /downloads` for all); one that has started finishes.
+
+The queue is kept in the database, so it survives restarts, crashes and power cuts: waiting downloads stay queued,
+and a download that was running is queued again and resumes (bdfrx's history skips what it already fetched). At
+startup the server also closes runs left marked running and moves files left in the staging folder into the archive,
+for any source no other process is downloading. `bdfrx-manager recover` does the same by hand.
+
+With `run_every_hours` set (e.g. `6`; `0` is off), the server queues every active source that often, least recently
+run first. The time it last did so is kept in the database, so restarting the server doesn't reset it.
+
+## Web UI
+
+`http://<host>:8765/` opens the web UI (it asks for the API key once per browser):
+
+- **Candidates**: people posting in your subreddits, with previews; Follow (downloads their history), Dismiss, Ignore
+- **Sources**: every source with a random thumbnail each visit, stats, Download now (normal, last week, all time),
+  Pause/Resume, Edit (settings, stats, recent runs, and for users the subreddits they post in, to follow or skip),
+  Ignore and Remove; Add and Run all active
+- **Latest**: what runs downloaded, newest first. Posts from subreddits offer Follow/Ignore for their author; posts
+  from people you follow offer Follow/Skip for their subreddit
+- **Runs**: the activity panel (downloading, waiting, recently finished, with live logs and cancel); a summary of the
+  last day or week with new files per day for 30 days; what needs attention (sources failing repeatedly, failed or
+  interrupted runs, files that couldn't be fetched, deactivations); and the run history with filters, logs (errors
+  and warnings highlighted) and Run again
+
+Run log files are deleted after `log_retention_days` (default 2); each run's result, counts and last lines stay in the
+database. Runs record what started them (`trigger`), and how many files failed for good or will be retried.
+
+Thumbnails are small JPEGs made with ffmpeg (a frame a second into videos) and cached in `log_dir/thumbs/`; without
+ffmpeg, cards show the source's initial instead.
+
 ## HTTP API
 
 ```bash
@@ -231,13 +270,21 @@ journalctl --user -u bdfrx-manager-api -f
 | DELETE | `/rules/{kind}/{value}`      | Remove                                               |
 | GET    | `/settings`                  | All settings with defaults and help                  |
 | PUT    | `/settings/{key}`            | Set; `{"value": null}` restores the default          |
-| GET    | `/runs`                      | Recent runs (`?kind=`, `?name=`, `?status=`)         |
+| GET    | `/runs`                      | Runs, newest first (`?kind=`, `?name=`, `?search=`, `?status=`, `?trigger=`, `?since=`, `?before_id=`) |
+| GET    | `/runs/stats`                | Totals for the last day and week, per-day series, log disk use (`?days=`) |
+| GET    | `/runs/attention`            | What needs attention                                 |
+| POST   | `/runs/{id}/again`           | Queue that run's source again with the same time window |
+| GET    | `/feed`                      | Latest downloaded posts (`?limit=`, `?before=` cursor, `?kind=`, `?name=`) |
+| GET    | `/sources/user/{name}/subreddits` | Subreddits a user posts in, followed or skipped |
 | GET    | `/runs/{id}`                 | One run                                              |
 | GET    | `/runs/{id}/log`             | Full bdfrx output                                    |
-| POST   | `/runs`                      | Start a run in the background (`dry_run` returns the plan) |
+| POST   | `/runs`                      | Queue every selected active source (`dry_run` returns the plan) |
 | GET    | `/candidates`                | Candidate users (`?min_posts=`, `?since=`, `?subreddit=`, `?limit=`) |
 | POST   | `/sources/{kind}/{name}/download` | Download one source now, in the background (`?time=`) |
-| GET    | `/downloads`                 | On-demand downloads: current, queued, and the last result |
+| GET    | `/downloads`                 | The queue: running (with files so far), waiting, recently finished |
+| DELETE | `/downloads/{id}`            | Cancel a waiting download (`DELETE /downloads` cancels all) |
+| GET    | `/sources/{kind}/{name}/thumbnail` | A small preview of a random image or video of theirs |
+| GET    | `/posts/{id}/files/{n}/thumbnail` | A small preview of one file                     |
 | GET    | `/candidates/{name}/posts`   | Their recent posts, each file with a `url` (`?limit=`) |
 | POST   | `/candidates/{name}/promote` | Add as an active user source and download them (`?download=false` to skip) |
 | GET    | `/candidates/dismissed`      | Dismissed users                                      |

@@ -13,6 +13,7 @@
     <nav class="tabs" aria-label="Sections">
       <a href="#candidates" data-tab="candidates">Candidates</a>
       <a href="#sources" data-tab="sources">Sources</a>
+      <a href="#latest" data-tab="latest">Latest</a>
       <a href="#runs" data-tab="runs">Runs</a>
       <a href="#rules" data-tab="rules">Rules</a>
       <a href="#settings" data-tab="settings">Settings</a>
@@ -49,6 +50,134 @@
       <p id="candidate-status" class="status"></p>
     </section>
 
+    <section id="view-sources" class="view" hidden>
+      <form class="filters" id="source-filters">
+        <label class="grow">Search
+          <input name="search" type="search" placeholder="Name" autocomplete="off" spellcheck="false">
+        </label>
+        <fieldset class="segmented">
+          <legend>Kind</legend>
+          <label><input type="radio" name="kind" value="all" checked><span>All</span></label>
+          <label><input type="radio" name="kind" value="user"><span>Users</span></label>
+          <label><input type="radio" name="kind" value="subreddit"><span>Subreddits</span></label>
+        </fieldset>
+        <label>Status
+          <select name="status">
+            <option value="active" data-label="Active">Active</option>
+            <option value="paused" data-label="Paused">Paused</option>
+            <option value="banned" data-label="Banned">Banned</option>
+            <option value="all" data-label="All">All</option>
+          </select>
+        </label>
+        <label>Sort
+          <select name="sort">
+            <option value="name">Name</option>
+            <option value="recent">Recently run</option>
+            <option value="stale">Longest since run</option>
+            <option value="new_files">Most new files</option>
+            <option value="total_files">Most files</option>
+            <option value="failures">Failures</option>
+          </select>
+        </label>
+        <div class="toolbar-actions">
+          <button type="button" class="primary" id="add-source">+ Add</button>
+          <button type="button" id="run-all">Run all active</button>
+        </div>
+      </form>
+      <div id="source-list" class="source-grid"></div>
+      <div id="source-sentinel" class="sentinel"></div>
+      <p id="source-status" class="status"></p>
+    </section>
+
+    <section id="view-runs" class="view" hidden>
+      <details class="activity-panel" id="activity-panel" open>
+        <summary><span class="activity-title">Activity</span> <span id="activity-summary" class="muted"></span></summary>
+        <div class="activity-body">
+          <p id="activity-schedule" class="muted small"></p>
+          <div id="activity-running-block" hidden>
+            <h3>Downloading</h3>
+            <ul id="activity-running" class="job-list"></ul>
+          </div>
+          <div id="activity-pending-block" hidden>
+            <h3>Waiting <button type="button" class="link" id="activity-cancel-all">Cancel all</button></h3>
+            <ul id="activity-pending" class="job-list"></ul>
+          </div>
+          <div id="activity-recent-block" hidden>
+            <h3>Recently finished</h3>
+            <ul id="activity-recent" class="job-list"></ul>
+          </div>
+        </div>
+      </details>
+
+      <section class="panel" id="runs-summary" aria-labelledby="summary-title">
+        <div class="panel-head">
+          <h2 id="summary-title">Summary</h2>
+          <fieldset class="segmented small-seg" id="summary-range">
+            <legend class="visually-hidden">Period</legend>
+            <label><input type="radio" name="range" value="last_24h" checked><span>Last day</span></label>
+            <label><input type="radio" name="range" value="last_7d"><span>Last week</span></label>
+          </fieldset>
+        </div>
+        <div class="tiles" id="summary-tiles"></div>
+        <h3 class="chart-title">New files per day, last 30 days</h3>
+        <div class="chart" id="chart" aria-describedby="chart-help"></div>
+        <p id="chart-help" class="visually-hidden">Use the left and right arrow keys to read each day.</p>
+        <details class="chart-table">
+          <summary class="muted small">Show as a table</summary>
+          <table id="chart-table">
+            <thead><tr><th>Day</th><th>New files</th><th>Runs</th><th>Failed</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </details>
+        <p class="muted small" id="summary-logs"></p>
+      </section>
+
+      <section class="panel" id="runs-attention" aria-labelledby="attention-title">
+        <div class="panel-head"><h2 id="attention-title">Needs attention</h2><span class="count-badge" id="attention-count"></span></div>
+        <div id="attention-body"><p class="muted">Loading…</p></div>
+      </section>
+
+      <section class="panel" aria-labelledby="history-title">
+        <div class="panel-head"><h2 id="history-title">History</h2></div>
+        <form class="filters" id="run-filters">
+          <label class="grow">Source <input name="name" type="search" placeholder="Name" autocomplete="off" spellcheck="false"></label>
+          <label>Result
+            <select name="status"><option value="">All</option><option value="failed">Failed</option><option value="ok">Succeeded</option><option value="running">Running</option></select>
+          </label>
+          <label>Kind
+            <select name="kind"><option value="">All</option><option value="user">Users</option><option value="subreddit">Subreddits</option></select>
+          </label>
+          <label>Started by
+            <select name="trigger">
+              <option value="">Anything</option><option value="schedule">Schedule</option><option value="follow">Following</option>
+              <option value="added">Adding</option><option value="manual">Download now</option><option value="run-all">Run all</option>
+              <option value="cli">Command line</option><option value="unknown">Unknown (older runs)</option>
+            </select>
+          </label>
+          <label>When
+            <select name="since"><option value="">Any time</option><option value="24h">Last day</option><option value="7d">Last week</option><option value="30d">Last month</option></select>
+          </label>
+        </form>
+        <ul class="job-list history" id="history-list"></ul>
+        <p class="status" id="history-status"></p>
+        <div class="load-more"><button type="button" id="history-more" hidden>Load older runs</button></div>
+      </section>
+    </section>
+
+    <section id="view-latest" class="view" hidden>
+      <form class="filters" id="latest-filters">
+        <fieldset class="segmented">
+          <legend>Downloaded from</legend>
+          <label><input type="radio" name="from" value="all" checked><span>Everything</span></label>
+          <label><input type="radio" name="from" value="subreddit"><span>Subreddits</span></label>
+          <label><input type="radio" name="from" value="user"><span>People you follow</span></label>
+        </fieldset>
+      </form>
+      <div id="latest-list" class="post-grid"></div>
+      <div id="latest-sentinel" class="sentinel"></div>
+      <p id="latest-status" class="status"></p>
+    </section>
+
     <section id="view-placeholder" class="view placeholder" hidden>
       <h2 id="placeholder-title"></h2>
       <p>Coming next. Until then, this section is available in the <a href="/docs">API docs</a>.</p>
@@ -58,6 +187,7 @@
   <nav class="bottom-tabs" aria-label="Sections">
     <a href="#candidates" data-tab="candidates">Candidates</a>
     <a href="#sources" data-tab="sources">Sources</a>
+    <a href="#latest" data-tab="latest">Latest</a>
     <a href="#runs" data-tab="runs">Runs</a>
     <a href="#rules" data-tab="rules">Rules</a>
     <a href="#settings" data-tab="settings">Settings</a>
@@ -88,6 +218,86 @@
         <button type="submit" value="ignore" class="primary">Ignore</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="key-dialog">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-message"></p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" class="ghost">Cancel</button>
+        <button type="submit" value="ok" class="primary" id="confirm-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="add-dialog" class="key-dialog">
+    <form method="dialog" id="add-form">
+      <h2>Add sources</h2>
+      <fieldset class="segmented">
+        <legend>Kind</legend>
+        <label><input type="radio" name="kind" value="user" checked><span>Users</span></label>
+        <label><input type="radio" name="kind" value="subreddit"><span>Subreddits</span></label>
+      </fieldset>
+      <label class="stacked">Names
+        <textarea name="names" rows="4" placeholder="One or more, separated by spaces, commas or new lines. u/ and r/ are fine." spellcheck="false"></textarea>
+      </label>
+      <label class="check">
+        <input type="checkbox" name="download">
+        <span>Download their history now (all time, up to about 1,000 posts each)</span>
+      </label>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" class="ghost" formnovalidate>Cancel</button>
+        <button type="submit" value="add" class="primary">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="source-sheet" class="sheet" aria-labelledby="sheet-title">
+    <div class="sheet-head">
+      <h2 id="sheet-title"></h2>
+      <button type="button" class="ghost" id="sheet-close">Close</button>
+    </div>
+    <div class="sheet-thumb" id="sheet-thumb"></div>
+    <div id="sheet-stats"></div>
+    <form id="sheet-form" class="sheet-form">
+      <h3>Settings</h3>
+      <label>Status
+        <select name="status">
+          <option value="active">active</option>
+          <option value="paused">paused</option>
+          <option value="banned">banned</option>
+        </select>
+      </label>
+      <label>Sort <select name="sort"></select></label>
+      <label>Time window <select name="time"></select></label>
+      <label>Gender filter <select name="filter_gender"></select></label>
+      <label>Minimum score <input name="min_score" type="number" inputmode="numeric" placeholder="No minimum"></label>
+      <label>Posts per run <input name="post_limit" type="number" min="1" inputmode="numeric" placeholder="No limit"></label>
+      <label class="wide">Note <textarea name="note" rows="2"></textarea></label>
+      <p class="wide muted small">Extra bdfrx arguments: <code id="sheet-extra-args"></code> (change with <code>bdfrx-manager set</code> on the server)</p>
+      <div class="wide dialog-actions"><span></span><button type="submit" class="primary">Save</button></div>
+    </form>
+    <div id="sheet-subreddits-block" hidden>
+      <h3>Subreddits they post in</h3>
+      <ul id="sheet-subreddits" class="job-list"></ul>
+    </div>
+    <h3>Recent runs</h3>
+    <ul id="sheet-runs" class="job-list"></ul>
+  </dialog>
+
+  <dialog id="log-dialog" class="log-dialog" aria-labelledby="log-title">
+    <div class="sheet-head">
+      <div>
+        <h2 id="log-title"></h2>
+        <p id="log-status" class="muted small"></p>
+      </div>
+      <span class="log-buttons">
+        <button type="button" class="ghost" id="log-next" hidden>Next problem</button>
+        <button type="button" class="ghost" id="log-close">Close</button>
+      </span>
+    </div>
+    <pre id="log-text"></pre>
   </dialog>
 
   <dialog id="viewer" class="viewer" aria-label="Post viewer">

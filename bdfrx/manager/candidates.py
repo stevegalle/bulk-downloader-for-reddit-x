@@ -46,6 +46,29 @@ def _name_pattern(subreddit: str) -> re.Pattern:
     )
 
 
+# In a user's folder the author is known and the subreddit isn't: <author>_<subreddit>_<postid>[_<score>][_<n>].<ext>
+_USER_FILE = re.compile(
+    r"^(?P<subreddit>[A-Za-z0-9_]+?)_(?P<post_id>[a-z0-9]{5,10})(?:_(?P<score>-?\d+))?(?:_\d+)?(?:\.\w+)?$",
+)
+
+
+def parse_user_file_name(file_name: str, author: str) -> Optional[ParsedPost]:
+    """Subreddit, post ID and score from a file downloaded from a user's posts, or None if it doesn't fit"""
+    if not file_name.lower().startswith(f"{author.lower()}_"):
+        return None
+    match = _USER_FILE.match(file_name[len(author) + 1 :])
+    if not match:
+        return None
+    return {
+        "post_id": match.group("post_id"),
+        "author": author,
+        "subreddit": match.group("subreddit"),
+        "score": int(match.group("score")) if match.group("score") else None,
+        "posted_at": None,
+        "files": [],
+    }
+
+
 def parse_file_name(file_name: str, subreddit: str) -> Optional[ParsedPost]:
     """Author, post ID and score from a file downloaded from the given subreddit, or None if it doesn't fit"""
     match = _name_pattern(subreddit).match(file_name)
@@ -70,17 +93,19 @@ def _posted_at(path: Path) -> Optional[str]:
 
 def parse_files(
     paths: Iterable[Path],
-    subreddit: str,
+    subreddit: Optional[str],
     final_path: Callable[[Path], Path] = lambda path: path,
+    author: Optional[str] = None,
 ) -> tuple[list[ParsedPost], int]:
     """Parse downloaded files into posts, one per post ID; returns (posts, number of unparseable files).
 
-    final_path maps where a file is now to where it will end up, for files about to be moved out of staging.
+    Files come from a subreddit's folder (subreddit given) or a user's (author given). final_path maps where a file
+    is now to where it will end up, for files about to be moved out of staging.
     """
     posts: dict[str, ParsedPost] = {}
     unparsed = 0
     for path in sorted(paths):
-        post = parse_file_name(path.name, subreddit)
+        post = parse_user_file_name(path.name, author) if author else parse_file_name(path.name, subreddit)
         if post is None:
             unparsed += 1
             continue
@@ -231,15 +256,15 @@ def promote(conn: sqlite3.Connection, name: str) -> dict:
 
 
 def since_to_timestamp(since: str) -> str:
-    """'30d', '12w', '6m' or a YYYY-MM-DD date -> 'YYYY-MM-DD HH:MM:SS' in UTC"""
-    if match := re.fullmatch(r"(\d+)([dwm])", since.strip().lower()):
-        days = int(match.group(1)) * {"d": 1, "w": 7, "m": 30}[match.group(2)]
+    """'24h', '30d', '12w', '6m' or a YYYY-MM-DD date -> 'YYYY-MM-DD HH:MM:SS' in UTC"""
+    if match := re.fullmatch(r"(\d+)([hdwm])", since.strip().lower()):
+        days = int(match.group(1)) * {"h": 1 / 24, "d": 1, "w": 7, "m": 30}[match.group(2)]
         moment = datetime.now(timezone.utc).timestamp() - days * 86400
         return datetime.fromtimestamp(moment, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     try:
         return datetime.strptime(since.strip(), "%Y-%m-%d").strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
-        raise service.ManagerError(f"{since!r} is not a period like 30d, 12w, 6m or a date like 2026-01-31")
+        raise service.ManagerError(f"{since!r} is not a period like 24h, 30d, 12w, 6m or a date like 2026-01-31")
 
 
 def _post_with_files(conn: sqlite3.Connection, post: sqlite3.Row) -> dict:

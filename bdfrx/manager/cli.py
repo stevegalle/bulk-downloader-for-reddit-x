@@ -1,4 +1,5 @@
 import json
+import logging
 import sqlite3
 import sys
 from pathlib import Path
@@ -712,6 +713,18 @@ def cli_log(context: click.Context, run_id: int) -> None:
         click.echo(run["output_tail"] or "")
 
 
+@cli.command("recover")
+@click.pass_context
+def cli_recover(context: click.Context) -> None:
+    """Close runs left marked running and move leftover staged files into the archive, for sources nothing is
+    downloading now. The API server does this at startup; this is for setups without it."""
+    report = runner.recover(_conn(context), progress=click.echo)
+    click.echo(
+        f"{report['runs_closed']} interrupted run(s) closed, {report['files_recovered']} file(s) moved into the archive"
+        f", {report['files_already_there']} already there",
+    )
+
+
 @cli.command("status")
 @click.pass_context
 def cli_status(context: click.Context) -> None:
@@ -745,6 +758,8 @@ def cli_serve(context: click.Context, host: str, port: int, api_key: Optional[st
             f"Warning: serving on {host} without an API key; anyone who can reach this port can use it",
             err=True,
         )
+    # So the manager's own messages (recovery after a restart, queue problems) reach the service log
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
     uvicorn.run(create_app(context.obj["db_path"], api_key), host=host, port=port)
 
 

@@ -32,6 +32,9 @@ DEFAULT_SETTINGS = {
     "run_timeout": "3600",
     "ignored_folder": "ignored",
     "follow_download_time": "all",
+    "max_concurrent_downloads": "2",
+    "run_every_hours": "0",
+    "log_retention_days": "2",
 }
 
 SETTING_HELP = {
@@ -51,6 +54,9 @@ SETTING_HELP = {
     "run_timeout": "Seconds before a single bdfrx invocation is killed",
     "ignored_folder": "Folder, beside users/ and subreddits/ in the archive, that set-aside files are moved into",
     "follow_download_time": f"Time filter for the download started when you follow a candidate: {', '.join(TIMES)}",
+    "max_concurrent_downloads": "How many bdfrx downloads may run at once, across the server and the CLI (1-8)",
+    "run_every_hours": "The server queues every active source this often (e.g. 6, or 0.5); 0 turns the schedule off",
+    "log_retention_days": "Days to keep each run's full log file; results and the last lines stay in the DB for good",
 }
 
 
@@ -131,8 +137,27 @@ def _validate_source_fields(fields: dict) -> None:
 
 def get_settings(conn: sqlite3.Connection) -> dict[str, str]:
     settings = dict(DEFAULT_SETTINGS)
-    settings.update({row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings;")})
+    settings.update(
+        {
+            row["key"]: row["value"]
+            for row in conn.execute("SELECT key, value FROM settings;")
+            if row["key"] in settings
+        },
+    )
     return settings
+
+
+def get_state(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    row = conn.execute("SELECT value FROM state WHERE key = ?;", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
+        (key, value),
+    )
+    conn.commit()
 
 
 def set_setting(conn: sqlite3.Connection, key: str, value: Optional[str]) -> None:
@@ -149,6 +174,17 @@ def set_setting(conn: sqlite3.Connection, key: str, value: Optional[str]) -> Non
         _check_choice(key, value, choices[key])
     if key == "run_timeout" and value is not None and not value.isdigit():
         raise ManagerError("run_timeout must be a whole number of seconds")
+    if key == "log_retention_days" and value is not None and not (value.isdigit() and int(value) >= 1):
+        raise ManagerError("log_retention_days must be a whole number of days, at least 1")
+    if key == "max_concurrent_downloads" and value is not None and not (value.isdigit() and 1 <= int(value) <= 8):
+        raise ManagerError("max_concurrent_downloads must be a whole number from 1 to 8")
+    if key == "run_every_hours" and value is not None:
+        try:
+            hours = float(value)
+        except ValueError:
+            hours = -1
+        if hours < 0 or (0 < hours < 0.25):  # noqa: PLR2004
+            raise ManagerError("run_every_hours must be 0 (off) or at least 0.25")
     if (
         key == "ignored_folder"
         and value is not None
@@ -185,17 +221,32 @@ def list_sources(
 ) -> list[dict]:
     _check_choice("kind", kind, SOURCE_KINDS)
     _check_choice("status", status, SOURCE_STATUSES)
-    query, params = "SELECT * FROM sources WHERE 1 = 1", []
+    query = """
+        SELECT s.*,
+               COALESCE(r.total_runs, 0) AS total_runs,
+               COALESCE(r.total_files, 0) AS total_files,
+               r.last_ok_at
+        FROM sources s
+        LEFT JOIN (
+            SELECT source_id,
+                   COUNT(*) AS total_runs,
+                   SUM(COALESCE(files_new, 0)) AS total_files,
+                   MAX(CASE WHEN status = 'ok' THEN started_at END) AS last_ok_at
+            FROM runs GROUP BY source_id
+        ) r ON r.source_id = s.id
+        WHERE 1 = 1
+    """
+    params: list = []
     if kind:
-        query += " AND kind = ?"
+        query += " AND s.kind = ?"
         params.append(kind)
     if status:
-        query += " AND status = ?"
+        query += " AND s.status = ?"
         params.append(status)
     if search:
-        query += " AND name LIKE ?"
+        query += " AND s.name LIKE ?"
         params.append(f"%{search}%")
-    query += " ORDER BY kind, name COLLATE NOCASE;"
+    query += " ORDER BY s.kind, s.name COLLATE NOCASE;"
     return [dict(row) for row in conn.execute(query, params)]
 
 
@@ -278,14 +329,31 @@ def ignore_user(conn: sqlite3.Connection, name: str, reason: Optional[str] = Non
 # Runs
 
 
-def list_runs(
+def list_runs(  # noqa: PLR0913
     conn: sqlite3.Connection,
     limit: int = 50,
     kind: Optional[str] = None,
     name: Optional[str] = None,
     status: Optional[str] = None,
+    trigger: Optional[str] = None,
+    since: Optional[str] = None,
+    before_id: Optional[int] = None,
+    search: Optional[str] = None,
 ) -> list[dict]:
+    """Runs, newest first. since is a 'YYYY-MM-DD HH:MM:SS' UTC timestamp; before_id pages back through history."""
     query, params = "SELECT * FROM runs WHERE 1 = 1", []
+    if trigger:
+        query += " AND COALESCE(trigger, 'unknown') = ?"
+        params.append(trigger)
+    if since:
+        query += " AND started_at >= ?"
+        params.append(since)
+    if before_id:
+        query += " AND id < ?"
+        params.append(before_id)
+    if search:
+        query += " AND source_name LIKE ?"
+        params.append(f"%{search}%")
     if kind:
         query += " AND source_kind = ?"
         params.append(kind)

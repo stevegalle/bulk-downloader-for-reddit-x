@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from bdfrx.manager import candidates, db, history, importer, runner, service, setaside
+from bdfrx.manager import candidates, db, history, importer, insights, runner, service, setaside
 from bdfrx.manager.cli import cli
 
 
@@ -467,7 +467,7 @@ def test_subreddit_run_records_posts(conn: sqlite3.Connection, fake_bdfrx: Path)
     service.add_source(conn, "user", "alice")
     results = {r["source_kind"]: r for r in runner.run(conn)}
     assert results["subreddit"]["posts_found"] == 1
-    assert results["user"]["posts_found"] is None
+    assert results["user"]["posts_found"] == 0  # the stand-in's file names don't parse
     [candidate] = candidates.list_candidates(conn)
     assert (candidate["name"], candidate["posts"], candidate["subreddits"]) == ("Poster_One", 1, ["pics"])
     assert runner.run(conn, kinds=["subreddit"])[0]["posts_found"] == 0
@@ -972,7 +972,7 @@ def test_runs_that_download_nothing_leave_no_folder(
     conn: sqlite3.Connection,
     fake_bdfrx: Path,
     tmp_path: Path,
-    staged: bool,  # noqa: FBT001
+    staged: bool,
 ):
     use_fake(conn, fake_bdfrx)
     if staged:
@@ -993,3 +993,219 @@ def test_set_aside_removes_emptied_user_folder(conn: sqlite3.Connection, archive
     assert (archive_with_alice / "subreddits" / "pics").is_dir()  # shared, and bob's file is still there
     setaside.restore(conn, "alice")
     assert (archive_with_alice / "users" / "alice" / "alice_dogs_ddd444_7.jpg").exists()
+
+
+def test_concurrent_connections_migrate_once(tmp_path: Path):
+    import threading
+
+    path = tmp_path / "fresh.db"
+    old = sqlite3.connect(path)
+    old.executescript(db._SCHEMA_V1)
+    old.execute("PRAGMA user_version = 1;")
+    old.commit()
+    old.close()
+    errors = []
+
+    def open_db() -> None:
+        try:
+            db.connect(path).close()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=open_db) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert db.connect(path).execute("PRAGMA user_version;").fetchone()[0] == db.SCHEMA_VERSION
+
+
+def test_download_slots_are_shared(tmp_path: Path):
+    import threading
+
+    held = []
+    release = threading.Event()
+
+    def hold() -> None:
+        with runner.download_slot(tmp_path, 2, poll_seconds=0.05) as slot:
+            held.append(slot)
+            release.wait(5)
+
+    holders = [threading.Thread(target=hold) for _ in range(2)]
+    for thread in holders:
+        thread.start()
+    for _ in range(100):
+        if len(held) == 2:
+            break
+        __import__("time").sleep(0.02)
+    assert sorted(held) == [0, 1]
+    assert runner.busy_slots(tmp_path, 2) == 2
+    third = []
+    waiter = threading.Thread(target=lambda: third.append(runner.download_slot(tmp_path, 2, 0.05).__enter__()))
+    waiter.start()
+    waiter.join(0.3)
+    assert third == []  # still waiting: both slots are taken
+    release.set()
+    waiter.join(5)
+    assert third in ([0], [1])
+    for thread in holders:
+        thread.join()
+
+
+def test_recover_leaves_busy_sources_alone_and_records_subreddit_posts(conn: sqlite3.Connection, tmp_path: Path):
+    service.set_setting(conn, "staging_root", str(tmp_path / "staging"))
+    busy = service.add_source(conn, "user", "busy")
+    pics = service.add_source(conn, "subreddit", "pics")
+    for source in (busy, pics):
+        conn.execute(
+            "INSERT INTO runs (source_id, source_kind, source_name, started_at) VALUES (?, ?, ?, datetime('now'));",
+            (source["id"], source["kind"], source["name"]),
+        )
+    conn.commit()
+    (tmp_path / "staging" / "users" / "busy").mkdir(parents=True)
+    (tmp_path / "staging" / "users" / "busy" / "busy_x_abc123_1.jpg").write_text("x")
+    (tmp_path / "staging" / "subreddits" / "pics").mkdir(parents=True)
+    (tmp_path / "staging" / "subreddits" / "pics" / "carol_pics_ccc111_5.jpg").write_text("x")
+
+    with runner.source_lock(tmp_path / "logs", busy):  # e.g. 'bdfrx-manager run' in a terminal
+        report = runner.recover(conn)
+    assert report == {"runs_closed": 1, "files_recovered": 1, "files_already_there": 0}
+    statuses = {r["source_name"]: r["status"] for r in service.list_runs(conn)}
+    assert statuses == {"busy": "running", "pics": "failed"}
+    assert (tmp_path / "staging" / "users" / "busy" / "busy_x_abc123_1.jpg").exists()
+    assert (tmp_path / "dest" / "subreddits" / "pics" / "carol_pics_ccc111_5.jpg").exists()
+    assert (
+        candidates.post_file_path(conn, "ccc111", 0)
+        == tmp_path / "dest" / "subreddits" / "pics" / "carol_pics_ccc111_5.jpg"
+    )
+    assert runner.recover(conn)["runs_closed"] == 1  # the busy one, once its process is gone
+
+
+# Runs page and Latest feed
+
+
+@pytest.mark.parametrize(
+    ("file_name", "expected"),
+    (
+        ("alice_18_19_1wjikf4_51.mp4", ("18_19", "1wjikf4", 51)),
+        ("alice_gonewildaudio_1wnmh0b_15_2.m4a", ("gonewildaudio", "1wnmh0b", 15)),
+        ("Alice_u_alice_abc123.jpg", ("u_alice", "abc123", None)),
+        ("alice_Pics_abcde_12.jpg", ("Pics", "abcde", 12)),
+    ),
+)
+def test_parse_user_file_name(file_name: str, expected: tuple):
+    post = candidates.parse_user_file_name(file_name, "alice")
+    assert (post["subreddit"], post["post_id"], post["score"]) == expected
+    assert post["author"] == "alice"
+
+
+def test_parse_user_file_name_rejects_other_authors():
+    assert candidates.parse_user_file_name("bob_pics_abc123_1.jpg", "alice") is None
+    assert candidates.parse_user_file_name("alice_notes.txt", "alice") is None
+
+
+@pytest.fixture
+def chatty_bdfrx(tmp_path: Path) -> Path:
+    """A stand-in bdfrx for user runs: writes real-looking file names and logs a retry and a permanent failure"""
+    script = tmp_path / "chatty_bdfrx.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            import sys
+            from pathlib import Path
+            args = sys.argv[1:]
+            target = Path(args[1]); target.mkdir(parents=True, exist_ok=True)
+            name = args[args.index("--user") + 1]
+            (target / f"{name}_cats_aaa111_5.jpg").write_text("x")
+            (target / f"{name}_dog_pics_bbb222_9_1.jpg").write_text("x")
+            print("[x - bdfrx.downloader - WARNING] - Could not download resource y now, will try again next run: 503")
+            print("[x - bdfrx.downloader - ERROR] - Failed to download resource z in submission q: HTTP Code 404")
+            """,
+        ),
+    )
+    return script
+
+
+def test_user_runs_record_posts_trigger_and_file_problems(conn: sqlite3.Connection, chatty_bdfrx: Path):
+    use_fake(conn, chatty_bdfrx)
+    service.add_source(conn, "user", "alice")
+    run = runner.run_one(conn, "user", "alice", trigger="follow")
+    assert (run["trigger"], run["files_failed"], run["files_retry"], run["posts_found"]) == ("follow", 1, 1, 2)
+    subreddits = {s["name"]: s for s in insights.author_subreddits(conn, "alice")}
+    assert set(subreddits) == {"cats", "dog_pics"}
+    assert runner.run(conn)[0]["trigger"] == "cli"
+
+
+def test_feed(conn: sqlite3.Connection, chatty_bdfrx: Path):
+    use_fake(conn, chatty_bdfrx)
+    service.add_source(conn, "user", "alice")
+    service.add_source(conn, "subreddit", "cats")
+    service.add_rule(conn, "skip_subreddit", "dog_pics")
+    candidates.record_posts(conn, [_post("zzz999", "scanned")])  # from scan-archive: not a download, not in the feed
+    runner.run_one(conn, "user", "alice")
+    page = insights.feed(conn, limit=1)
+    assert len(page) == 1
+    rest = insights.feed(conn, before=page[0]["cursor"])
+    posts = {p["subreddit"]: p for p in page + rest}
+    assert set(posts) == {"cats", "dog_pics"}
+    assert (posts["cats"]["subreddit_status"], posts["cats"]["subreddit_skipped"]) == ("active", False)
+    assert (posts["dog_pics"]["subreddit_status"], posts["dog_pics"]["subreddit_skipped"]) == (None, True)
+    assert posts["cats"]["author_status"] == "active"
+    assert posts["cats"]["source_kind"] == "user"
+    assert insights.feed(conn, kind="subreddit") == []
+
+
+def test_author_subreddits_leaves_out_their_profile(conn: sqlite3.Connection):
+    candidates.record_posts(
+        conn,
+        [
+            _post("a1", "alice", "cats"),
+            _post("a2", "alice", "CATS"),
+            _post("a3", "alice", "u_alice"),
+            _post("a4", "bob", "dogs"),
+        ],
+    )
+    service.add_source(conn, "subreddit", "cats", status="paused")
+    [cats] = insights.author_subreddits(conn, "ALICE")
+    assert (cats["posts"], cats["status"], cats["skipped"]) == (2, "paused", False)
+
+
+def test_run_stats_and_attention(conn: sqlite3.Connection, fake_bdfrx: Path):
+    use_fake(conn, fake_bdfrx)
+    for name in ("alice", "broken", "gone"):
+        service.add_source(conn, "user", name)
+    runner.run(conn)
+    stats = insights.run_stats(conn, days=7)
+    assert len(stats["per_day"]) == 7
+    assert stats["per_day"][-1]["runs"] == 3
+    assert stats["last_24h"]["runs"] == 3
+    assert (stats["last_24h"]["ok"], stats["last_24h"]["failed"], stats["last_24h"]["deactivated"]) == (2, 1, 1)
+    runner.run(conn)
+    runner.run(conn)
+    attention = insights.attention(conn)
+    assert [s["name"] for s in attention["failing_sources"]] == ["broken"]
+    assert {r["source_name"] for r in attention["failed_runs"]} == {"broken"}
+    assert [d["source_name"] for d in attention["deactivated"]] == ["gone"]
+
+
+def test_run_time_window():
+    assert insights.run_time_window({"command": "bdfrx download x --user a --time all --sort new"}) == "all"
+    assert insights.run_time_window({"command": "bdfrx download x"}) is None
+    assert insights.run_time_window({"command": None}) is None
+
+
+def test_prune_logs(conn: sqlite3.Connection, tmp_path: Path):
+    service.set_setting(conn, "log_retention_days", "2")
+    runs = tmp_path / "logs" / "runs"
+    runs.mkdir(parents=True)
+    old, fresh = runs / "old.log", runs / "fresh.log"
+    old.write_text("x")
+    fresh.write_text("x")
+    three_days_ago = __import__("time").time() - 3 * 86400
+    os.utime(old, (three_days_ago, three_days_ago))
+    assert insights.prune_logs(service.get_settings(conn)) == 1
+    assert not old.exists()
+    assert fresh.exists()
+    with pytest.raises(service.ManagerError):
+        service.set_setting(conn, "log_retention_days", "0")
