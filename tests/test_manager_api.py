@@ -536,3 +536,128 @@ def test_feed_and_user_subreddits_endpoints(client: TestClient, tmp_path: Path):
     assert post["files"][0]["url"] == "/posts/aaa111/files/0"
     assert client.get("/sources/user/alice/subreddits").json()[0]["name"] == "cats"
     assert client.get("/sources/user/nobody/subreddits").status_code == 404
+
+
+def test_feed_groups_endpoint(client: TestClient, tmp_path: Path):
+    from bdfrx.manager import candidates
+
+    conn = db.connect(tmp_path / "api.db")
+    run_id = conn.execute(
+        "INSERT INTO runs (source_kind, source_name, started_at, status) VALUES ('subreddit', 'pics', datetime('now'), 'ok');",
+    ).lastrowid
+    conn.commit()
+    candidates.record_posts(
+        conn,
+        [
+            {
+                "post_id": "p1xxx1",
+                "author": "zed",
+                "subreddit": "pics",
+                "score": 1,
+                "posted_at": None,
+                "files": ["/x/p.jpg"],
+            }
+        ],
+        run_id,
+    )
+    conn.close()
+    assert [(s["kind"], s["name"], s["posts"]) for s in client.get("/feed/sources").json()] == [
+        ("subreddit", "pics", 1)
+    ]
+    groups = client.get("/feed/groups", params={"per_source": 5}).json()
+    assert groups["total"] == 1
+    assert groups["groups"][0]["items"][0]["files"][0]["url"] == "/posts/p1xxx1/files/0"
+    assert client.get("/feed/sources", params={"kind": "user"}).json() == []
+
+
+def test_requested_downloads_go_ahead_of_bulk_ones(tmp_path: Path):
+    from bdfrx.manager.jobs import DownloadQueue, _wider_time
+
+    _configure(tmp_path / "api.db", log_dir=str(tmp_path / "logs"), dest_root=str(tmp_path / "dest"))
+    queue = DownloadQueue(tmp_path / "api.db", start=False)
+    for name in ("a1", "b2", "c3"):
+        queue.add("subreddit", name, trigger="run-all")
+    assert queue.add("user", "fresh", "all", trigger="follow") == "queued"
+    assert queue.add("subreddit", "d4", trigger="schedule") == "queued"
+    assert queue.add("subreddit", "e5", "week", trigger="manual") == "queued"
+    order = [j["name"] for j in queue.snapshot()["pending"]]
+    assert order == ["fresh", "e5", "a1", "b2", "c3", "d4"]
+
+    # Following someone already waiting in a bulk run moves them up, with the wider time window, behind requests
+    # made before it
+    time.sleep(1.1)  # queued_at has one-second resolution
+    assert queue.add("subreddit", "c3", "all", trigger="follow") == "moved up"
+    pending = queue.snapshot()["pending"]
+    assert [j["name"] for j in pending][:3] == ["fresh", "e5", "c3"]
+    moved = next(j for j in pending if j["name"] == "c3")
+    assert (moved["time"], moved["trigger"], moved["priority"]) == ("all", "follow", 1)
+    assert queue.add("subreddit", "c3", "week", trigger="manual") == "already queued"  # already at the front
+
+    # The worker takes them in that order
+    conn = db.connect(tmp_path / "api.db")
+    assert queue._claim(conn)["name"] == "fresh"
+    assert queue.add("user", "fresh", trigger="manual") == "already queued"  # running now: left alone
+    conn.close()
+
+    assert _wider_time("week", "all") == "all"
+    assert _wider_time("month", "day") == "month"
+    assert _wider_time(None, "day") == "day"
+    assert _wider_time("week", None) == "week"
+
+
+@pytest.fixture
+def limited_bdfrx(tmp_path: Path) -> Path:
+    """A stand-in bdfrx that downloads one file, then stops because a host keeps refusing with HTTP 429"""
+    script = tmp_path / "limited_bdfrx.py"
+    script.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "target = Path(args[1]); target.mkdir(parents=True, exist_ok=True)\n"
+        "(target / 'x_pics_abc123_1.jpg').write_text('x')\n"
+        "print('[x - bdfrx.__main__ - ERROR] - Stopped: rate limited by i.imgur.com; the rest of this run')\n"
+        "sys.exit(75)\n",
+    )
+    return script
+
+
+def test_rate_limited_download_goes_to_the_back_and_waits(tmp_path: Path, limited_bdfrx: Path):
+    from bdfrx.manager import insights, runner
+    from bdfrx.manager.jobs import DownloadQueue
+
+    _configure(
+        tmp_path / "api.db",
+        log_dir=str(tmp_path / "logs"),
+        dest_root=str(tmp_path / "dest"),
+        bdfrx_command=f"{sys.executable} {limited_bdfrx}",
+        rate_limit_backoff_minutes="30",
+    )
+    conn = db.connect(tmp_path / "api.db")
+    service.add_source(conn, "subreddit", "pics")
+    service.add_source(conn, "subreddit", "cats")
+    run = runner.run_one(conn, "subreddit", "pics")
+    assert (run["status"], run["rate_limited"], run["files_new"]) == ("failed", "i.imgur.com", 1)
+
+    queue = DownloadQueue(tmp_path / "api.db", start=False)
+    queue.add("subreddit", "pics", "all", trigger="follow")
+    queue.add("subreddit", "cats", trigger="run-all")
+    job = queue._claim(conn)
+    assert job["name"] == "pics"
+    queue._run(conn, job)
+    state = queue.snapshot()
+    assert state["recent"][0]["status"] == "rate-limited"
+    assert "i.imgur.com" in state["recent"][0]["reason"]
+    assert [j["name"] for j in state["pending"]] == ["cats", "pics"]  # back of the queue
+    requeued = state["pending"][1]
+    assert (requeued["priority"], requeued["time"], requeued["trigger"]) == (0, "all", "follow")
+    assert requeued["not_before"] > requeued["queued_at"]
+
+    assert queue._claim(conn)["name"] == "cats"
+    assert queue._claim(conn) is None  # pics must wait out the backoff
+    # Asking for it again by hand puts it at the front and lifts the wait
+    assert queue.add("subreddit", "pics", trigger="manual") == "moved up"
+    assert queue._claim(conn)["name"] == "pics"
+    assert any(run["rate_limited"] for run in insights.attention(conn)["failed_runs"])
+    with pytest.raises(service.ManagerError):
+        service.set_setting(conn, "rate_limit_backoff_minutes", "0")
+    conn.close()

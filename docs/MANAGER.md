@@ -196,6 +196,15 @@ and a download that was running is queued again and resumes (bdfrx's history ski
 startup the server also closes runs left marked running and moves files left in the staging folder into the archive,
 for any source no other process is downloading. `bdfrx-manager recover` does the same by hand.
 
+Downloads you ask for (following someone, adding a source, Download now, Run again) go ahead of bulk ones (Run all,
+the schedule); within each, first come, first served. Asking for a source that is already waiting in a bulk run moves
+it to the front, with the wider of the two time windows.
+
+When a site keeps refusing with HTTP 429 (three files in a row from the same host), bdfrx stops the run with exit code
+75 instead of working through the rest against the same limit. The queue puts it at the back, not to start again for
+`rate_limit_backoff_minutes` (default 30); nothing it couldn't fetch was recorded as done, so the next run gets it.
+Asking for it by hand (Download now) lifts the wait.
+
 With `run_every_hours` set (e.g. `6`; `0` is off), the server queues every active source that often, least recently
 run first. The time it last did so is kept in the database, so restarting the server doesn't reset it.
 

@@ -148,8 +148,31 @@ CREATE INDEX IF NOT EXISTS runs_started ON runs (started_at);
 CREATE INDEX IF NOT EXISTS posts_run ON posts (run_id);
 """
 
+# The Latest page works per source
+_SCHEMA_V8 = """
+CREATE INDEX IF NOT EXISTS runs_source_name ON runs (source_kind, source_name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS posts_found ON posts (found_at);
+"""
+
+# Downloads you ask for go ahead of bulk ones in the queue
+_SCHEMA_V9 = """
+ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN not_before TEXT;
+CREATE INDEX IF NOT EXISTS jobs_order ON jobs (state, priority DESC, queued_at, id);
+"""
+
 # Index i holds the script that upgrades a database from version i to version i + 1
-_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7)
+_MIGRATIONS = (
+    _SCHEMA_V1,
+    _SCHEMA_V2,
+    _SCHEMA_V3,
+    _SCHEMA_V4,
+    _SCHEMA_V5,
+    _SCHEMA_V6,
+    _SCHEMA_V7,
+    _SCHEMA_V8,
+    _SCHEMA_V9,
+)
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 

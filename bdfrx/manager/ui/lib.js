@@ -171,6 +171,13 @@ export const redditLink = (kind, name) =>
 
 export const sourceLabel = (kind, name) => `${kind === "user" ? "u/" : "r/"}${name}`;
 
+// What happened when a download was asked for: queued, moved to the front of the queue, or already queued
+export function queuedMessage(result, label, detail = "") {
+  if (result === "queued") return `Queued ${label}${detail}`;
+  if (result === "moved up") return `Moved ${label} to the front of the queue${detail}`;
+  return `${label} is already queued or downloading`;
+}
+
 // Ignoring a user, shared by Candidates and Sources: asks first, optionally moving their files aside
 
 export async function confirmIgnore(name) {

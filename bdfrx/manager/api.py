@@ -434,6 +434,36 @@ def create_app(  # noqa: PLR0915
                 file["url"] = f"/posts/{post['post_id']}/files/{file['index']}"
         return posts
 
+    def with_urls(posts: list[dict]) -> list[dict]:
+        for post in posts:
+            for file in post["files"]:
+                file["url"] = f"/posts/{post['post_id']}/files/{file['index']}"
+        return posts
+
+    @app.get("/feed/sources")
+    def latest_sources(
+        conn: Conn,
+        days: int = Query(7, ge=1, le=3650),
+        kind: Optional[SourceKind] = None,
+    ) -> list[dict]:
+        """Sources that downloaded posts in the last `days` days, most recent first, with counts"""
+        return insights.feed_sources(conn, days, kind)
+
+    @app.get("/feed/groups")
+    def latest_groups(
+        conn: Conn,
+        days: int = Query(7, ge=1, le=3650),
+        per_source: int = Query(12, ge=1, le=50),
+        kind: Optional[SourceKind] = None,
+        limit: int = Query(20, ge=1, le=100),
+        offset: int = Query(0, ge=0),
+    ) -> dict:
+        """Recent downloads grouped by source: each source with its newest posts, paged by source"""
+        result = insights.feed_groups(conn, days, per_source, kind, limit, offset)
+        for group in result["groups"]:
+            with_urls(group["items"])
+        return result
+
     @app.get("/sources/user/{name}/subreddits")
     def user_subreddits(name: str, conn: Conn) -> list[dict]:
         """Subreddits a user posts in (from recorded posts), and whether you follow or skip each"""

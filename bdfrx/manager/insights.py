@@ -1,6 +1,7 @@
 """Read-only views over what the manager has done: the Latest feed, where users post, run stats, things needing
 attention; and tidying old run logs."""
 
+import re
 import shlex
 import sqlite3
 import time
@@ -55,6 +56,40 @@ def feed(
         post["subreddit_skipped"] = bool(post["subreddit_skipped"])
         posts.append(post)
     return posts
+
+
+def feed_sources(conn: sqlite3.Connection, days: int = 7, kind: Optional[str] = None) -> list[dict]:
+    """Sources whose runs downloaded posts in the last `days` days, most recent first, with how many posts and the
+    cursor of their newest one (for "unseen" markers)"""
+    query = """
+        SELECT r.source_kind AS kind, r.source_name AS name, COUNT(*) AS posts, MAX(p.found_at) AS last_found,
+               MAX(p.rowid) AS latest_cursor,
+               (SELECT status FROM sources s WHERE s.kind = r.source_kind AND s.name = r.source_name) AS status
+        FROM posts p JOIN runs r ON r.id = p.run_id
+        WHERE p.found_at >= ?
+    """
+    params: list = [_ago(days=days)]
+    if kind:
+        query += " AND r.source_kind = ?"
+        params.append(kind)
+    query += " GROUP BY r.source_kind, r.source_name COLLATE NOCASE ORDER BY last_found DESC, latest_cursor DESC;"
+    return [dict(row) for row in conn.execute(query, params)]
+
+
+def feed_groups(
+    conn: sqlite3.Connection,
+    days: int = 7,
+    per_source: int = 12,
+    kind: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict:
+    """The feed grouped by source: each source with recent downloads and its newest posts. Paged by source."""
+    sources = feed_sources(conn, days, kind)
+    page = sources[offset : offset + limit]
+    for source in page:
+        source["items"] = feed(conn, per_source, kind=source["kind"], name=source["name"])
+    return {"total": len(sources), "groups": page}
 
 
 def author_subreddits(conn: sqlite3.Connection, name: str) -> list[dict]:
@@ -125,7 +160,11 @@ def attention(conn: sqlite3.Connection) -> dict:
         )
     ]
     failed_runs = [
-        {**dict(row), "interrupted": "interrupted" in (row["output_tail"] or "")}
+        {
+            **dict(row),
+            "interrupted": "interrupted" in (row["output_tail"] or ""),
+            "rate_limited": bool(re.search(r"Stopped: rate limited by", row["output_tail"] or "")),
+        }
         for row in conn.execute(
             "SELECT * FROM runs WHERE status = 'failed' AND started_at >= ? ORDER BY id DESC LIMIT 20;",
             (since,),

@@ -1079,6 +1079,7 @@ def test_recover_leaves_busy_sources_alone_and_records_subreddit_posts(conn: sql
         candidates.post_file_path(conn, "ccc111", 0)
         == tmp_path / "dest" / "subreddits" / "pics" / "carol_pics_ccc111_5.jpg"
     )
+    assert [p["post_id"] for p in insights.feed(conn)] == ["ccc111"]  # credited to the interrupted run
     assert runner.recover(conn)["runs_closed"] == 1  # the busy one, once its process is gone
 
 
@@ -1209,3 +1210,38 @@ def test_prune_logs(conn: sqlite3.Connection, tmp_path: Path):
     assert fresh.exists()
     with pytest.raises(service.ManagerError):
         service.set_setting(conn, "log_retention_days", "0")
+
+
+def _downloaded(conn: sqlite3.Connection, kind: str, name: str, posts: list[dict], found_days_ago: float = 0) -> None:
+    """Record posts as downloaded by a run of the given source, found some days ago"""
+    run_id = conn.execute(
+        "INSERT INTO runs (source_kind, source_name, started_at, status) VALUES (?, ?, datetime('now'), 'ok');",
+        (kind, name),
+    ).lastrowid
+    candidates.record_posts(conn, posts, run_id)
+    conn.execute(
+        "UPDATE posts SET found_at = datetime('now', ?) WHERE run_id = ?;",
+        (f"-{found_days_ago} days", run_id),
+    )
+    conn.commit()
+
+
+def test_feed_sources_and_groups(conn: sqlite3.Connection):
+    service.add_source(conn, "user", "alice")
+    _downloaded(conn, "user", "alice", [_post(f"a{i}xx1", "alice", "cats") for i in range(5)], found_days_ago=2)
+    _downloaded(conn, "subreddit", "pics", [_post("p1xxx1", "zed", "pics")], found_days_ago=0.1)
+    _downloaded(conn, "subreddit", "old", [_post("o1xxx1", "zed", "old")], found_days_ago=20)
+
+    sources = insights.feed_sources(conn, days=7)
+    assert [(s["kind"], s["name"], s["posts"]) for s in sources] == [("subreddit", "pics", 1), ("user", "alice", 5)]
+    assert sources[1]["status"] == "active"
+    assert sources[0]["status"] is None  # downloaded once, since removed
+    assert [s["name"] for s in insights.feed_sources(conn, days=30)] == ["pics", "alice", "old"]
+    assert [s["name"] for s in insights.feed_sources(conn, days=7, kind="user")] == ["alice"]
+
+    groups = insights.feed_groups(conn, days=7, per_source=3)
+    assert groups["total"] == 2
+    assert [len(g["items"]) for g in groups["groups"]] == [1, 3]
+    assert {p["author"] for p in groups["groups"][1]["items"]} == {"alice"}
+    second_page = insights.feed_groups(conn, days=7, limit=1, offset=1)
+    assert [g["name"] for g in second_page["groups"]] == ["alice"]

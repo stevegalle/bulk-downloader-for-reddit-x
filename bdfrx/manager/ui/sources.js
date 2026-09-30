@@ -10,6 +10,7 @@ import {
   ignoreMessage,
   ignoreUser,
   number,
+  queuedMessage,
   redditLink,
   sinceShort,
   sourceLabel,
@@ -305,7 +306,7 @@ async function download(source, time) {
   try {
     const { download: result } = await api(`${sourcePath(source)}/download${query}`, { method: "POST" });
     const what = time === "all" ? " (all time)" : time === "week" ? " (last week)" : "";
-    toast(result === "queued" ? `Queued ${sourceLabel(source.kind, source.name)}${what}` : `${sourceLabel(source.kind, source.name)} is already queued`);
+    toast(queuedMessage(result, sourceLabel(source.kind, source.name), what));
     refreshDownloads();
   } catch (e) {
     toast(`Could not queue ${sourceLabel(source.kind, source.name)}: ${e.message}`, { error: true });
@@ -442,7 +443,7 @@ function setUpAddDialog() {
       try {
         const source = await api("/sources", { method: "POST", body: { kind, name, download: form.download.checked } });
         results.added += 1;
-        if (source.download === "queued") results.queued += 1;
+        if (source.download === "queued" || source.download === "moved up") results.queued += 1;
       } catch (e) {
         if (e.message.includes("already exists")) results.exists += 1;
         else results.invalid.push(name);

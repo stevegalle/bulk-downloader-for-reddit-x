@@ -21,6 +21,22 @@ logger = logging.getLogger(__name__)
 RECENT = 10
 IDLE_POLL = 5
 
+# Downloads you asked for (following someone, adding a source, Download now, Run again) go ahead of bulk ones
+# (Run all, the schedule); within a priority it's first come, first served
+PRIORITY = {"follow": 1, "added": 1, "manual": 1}
+
+# Time windows from narrowest to widest, for merging a request into a queued download of the same source
+_TIME_ORDER = ("hour", "day", "week", "month", "year", "all")
+
+
+def _wider_time(current: Optional[str], requested: Optional[str]) -> Optional[str]:
+    """The wider of two time windows; None means the source's own setting, which an explicit request replaces"""
+    if requested is None:
+        return current
+    if current is None:
+        return requested
+    return max(current, requested, key=_TIME_ORDER.index)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -70,19 +86,32 @@ class DownloadQueue:
     # Adding, cancelling, looking
 
     def add(self, kind: str, name: str, time: Optional[str] = None, trigger: str = "manual") -> str:
+        """Queue a download. Returns "queued", "moved up" (it was waiting behind bulk work and now goes first, with
+        the wider of the two time windows), or "already queued" (already running, or already waiting at this
+        priority)."""
+        priority = PRIORITY.get(trigger, 0)
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE;")
             existing = conn.execute(
-                "SELECT 1 FROM jobs WHERE state IN ('pending', 'running') AND kind = ? AND name = ? COLLATE NOCASE;",
+                "SELECT * FROM jobs WHERE state IN ('pending', 'running') AND kind = ? AND name = ? COLLATE NOCASE;",
                 (kind, name),
             ).fetchone()
+            if existing and existing["state"] == "pending" and priority > existing["priority"]:
+                conn.execute(
+                    # queued_at restarts, so among requested downloads it's first come, first served from now
+                    "UPDATE jobs SET priority = ?, trigger = ?, time = ?, queued_at = ?, not_before = NULL "
+                    "WHERE id = ?;",
+                    (priority, trigger, _wider_time(existing["time"], time), _now(), existing["id"]),
+                )
+                conn.commit()
+                return "moved up"
             if existing:
                 conn.rollback()
                 return "already queued"
             conn.execute(
-                "INSERT INTO jobs (kind, name, time, trigger, queued_at) VALUES (?, ?, ?, ?, ?);",
-                (kind, name, time, trigger, _now()),
+                "INSERT INTO jobs (kind, name, time, trigger, queued_at, priority) VALUES (?, ?, ?, ?, ?, ?);",
+                (kind, name, time, trigger, _now(), priority),
             )
             conn.commit()
         finally:
@@ -116,7 +145,7 @@ class DownloadQueue:
 
             return {
                 "running": rows("SELECT * FROM jobs WHERE state = 'running' ORDER BY started_at, id;"),
-                "pending": rows("SELECT * FROM jobs WHERE state = 'pending' ORDER BY id;"),
+                "pending": rows("SELECT * FROM jobs WHERE state = 'pending' ORDER BY priority DESC, queued_at, id;"),
                 "recent": rows(
                     "SELECT * FROM jobs WHERE state = 'finished' ORDER BY finished_at DESC, id DESC LIMIT ?;",
                     RECENT,
@@ -143,11 +172,25 @@ class DownloadQueue:
         for source in sources:
             if runner.skip_reason(source, rules):
                 counts["skipped"] += 1
-            elif self.add(source["kind"], source["name"], trigger=trigger) == "queued":
+            elif self.add(source["kind"], source["name"], trigger=trigger) in ("queued", "moved up"):
                 counts["queued"] += 1
             else:
                 counts["already_queued"] += 1
         return counts
+
+    def _requeue_later(self, conn: sqlite3.Connection, job: dict) -> str:
+        """Put a rate-limited download at the back of the queue, not to start before the backoff has passed"""
+        minutes = int(service.get_settings(conn)["rate_limit_backoff_minutes"])
+        retry_at = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "INSERT INTO jobs (kind, name, time, trigger, queued_at, priority, not_before) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?);",
+            (job["kind"], job["name"], job["time"], job["trigger"], _now(), retry_at),
+        )
+        conn.commit()
+        with self.wake:
+            self.wake.notify()
+        return retry_at
 
     # Workers
 
@@ -173,7 +216,11 @@ class DownloadQueue:
         limit = int(service.get_settings(conn)["max_concurrent_downloads"])
         conn.execute("BEGIN IMMEDIATE;")
         running = conn.execute("SELECT COUNT(*) FROM jobs WHERE state = 'running';").fetchone()[0]
-        row = conn.execute("SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1;").fetchone()
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE state = 'pending' AND (not_before IS NULL OR not_before <= ?) "
+            "ORDER BY priority DESC, queued_at, id LIMIT 1;",
+            (_now(),),
+        ).fetchone()
         if row is None or running >= limit:
             conn.rollback()
             return None
@@ -212,6 +259,12 @@ class DownloadQueue:
             outcome.update(run_id=run["id"], status=run["status"], files_new=run["files_new"])
             if run["deactivated"]:
                 outcome.update(status="deactivated", reason=run["deactivated"])
+            if run["rate_limited"]:
+                retry_at = self._requeue_later(conn, job)
+                outcome.update(
+                    status="rate-limited",
+                    reason=f"rate limited by {run['rate_limited']}; queued again, not before {retry_at} UTC",
+                )
         except service.ManagerError as e:  # unfollowed, paused, ignored, or already downloading
             outcome.update(status="skipped", reason=str(e))
         except Exception as e:

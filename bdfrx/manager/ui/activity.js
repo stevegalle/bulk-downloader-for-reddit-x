@@ -37,6 +37,7 @@ function announce(job) {
   if (job.status === "ok") toast(`${label}: ${number(job.files_new)} new file${job.files_new === 1 ? "" : "s"}`);
   else if (job.status === "deactivated") toast(`${label} deactivated: ${job.reason}`, { error: true });
   else if (job.status === "skipped") toast(`${label}: download skipped (${job.reason})`);
+  else if (job.status === "rate-limited") toast(`${label}: stopped early, ${job.reason.split(";")[0]}. Queued again for later.`);
   else if (job.status === "failed") toast(`${label}: download failed${job.reason ? ` (${job.reason})` : ""}. See its log.`, { error: true });
 }
 

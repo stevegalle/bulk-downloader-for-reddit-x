@@ -32,14 +32,16 @@ const PREVIEW_POSTS = 8;
 const VIEWS = {
   candidates: { title: "Candidates", show: showCandidates },
   sources: { title: "Sources", show: () => showSources(true), hide: () => showSources(false) },
-  latest: { title: "Latest", show: () => showLatest(true), hide: () => showLatest(false) },
+  latest: { title: "Latest", show: (path) => showLatest(true, path), hide: () => showLatest(false) },
   runs: { title: "Runs", show: () => showRuns(true), hide: () => showRuns(false) },
 };
 const TAB_TITLES = { rules: "Rules", settings: "Settings" };
 let currentTab = null;
 
 function route() {
-  const tab = location.hash.slice(1) || "candidates";
+  // "#latest/u/name" is the latest tab showing one source; the part after the tab name goes to the page
+  const [first, ...path] = decodeURIComponent(location.hash.slice(1)).split("/");
+  const tab = first || "candidates";
   for (const link of document.querySelectorAll("[data-tab]")) {
     if (link.dataset.tab === tab) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -50,7 +52,7 @@ function route() {
   if (VIEWS[tab]) {
     $(`#view-${tab}`).hidden = false;
     document.title = `${VIEWS[tab].title} · bdfrx manager`;
-    VIEWS[tab].show();
+    VIEWS[tab].show(path);
   } else {
     $("#view-placeholder").hidden = false;
     $("#placeholder-title").textContent = TAB_TITLES[tab] || "Not found";

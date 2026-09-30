@@ -35,6 +35,7 @@ DEFAULT_SETTINGS = {
     "max_concurrent_downloads": "2",
     "run_every_hours": "0",
     "log_retention_days": "2",
+    "rate_limit_backoff_minutes": "30",
 }
 
 SETTING_HELP = {
@@ -57,6 +58,8 @@ SETTING_HELP = {
     "max_concurrent_downloads": "How many bdfrx downloads may run at once, across the server and the CLI (1-8)",
     "run_every_hours": "The server queues every active source this often (e.g. 6, or 0.5); 0 turns the schedule off",
     "log_retention_days": "Days to keep each run's full log file; results and the last lines stay in the DB for good",
+    "rate_limit_backoff_minutes": "A download stopped by a site's rate limit goes to the back of the queue, not to "
+    "start again for this long",
 }
 
 
@@ -174,6 +177,8 @@ def set_setting(conn: sqlite3.Connection, key: str, value: Optional[str]) -> Non
         _check_choice(key, value, choices[key])
     if key == "run_timeout" and value is not None and not value.isdigit():
         raise ManagerError("run_timeout must be a whole number of seconds")
+    if key == "rate_limit_backoff_minutes" and value is not None and not (value.isdigit() and int(value) >= 1):
+        raise ManagerError("rate_limit_backoff_minutes must be a whole number of minutes, at least 1")
     if key == "log_retention_days" and value is not None and not (value.isdigit() and int(value) >= 1):
         raise ManagerError("log_retention_days must be a whole number of days, at least 1")
     if key == "max_concurrent_downloads" and value is not None and not (value.isdigit() and 1 <= int(value) <= 8):

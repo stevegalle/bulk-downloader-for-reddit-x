@@ -38,6 +38,9 @@ _FILE_FAILED = re.compile(
     r"|Unexpected error downloading submission|Could not generate file path",
 )
 _FILE_RETRY = re.compile(r"will try again next run")
+# bdfrx stops a run when a site keeps refusing with HTTP 429, and exits with this code
+_RATE_LIMITED = re.compile(r"Stopped: rate limited by (\S+?);")
+RATE_LIMITED_EXIT_CODE = 75
 
 
 class RunLockedError(service.ManagerError):
@@ -467,7 +470,10 @@ def _run_source(  # noqa: PLR0913
                 conn.execute("UPDATE runs SET deactivated = ? WHERE id = ?;", (deactivated, run_id))
                 break
     conn.commit()
-    return {**service.get_run(conn, run_id), "deactivated": deactivated}
+    rate_limited = None
+    if exit_code == RATE_LIMITED_EXIT_CODE and (match := _RATE_LIMITED.search(output)):
+        rate_limited = match.group(1)
+    return {**service.get_run(conn, run_id), "deactivated": deactivated, "rate_limited": rate_limited}
 
 
 def run(
@@ -517,6 +523,8 @@ def run(
             progress(f"    {result['status']}, {result['files_new']} new file(s){found}")
             if result["deactivated"]:
                 progress(f"    deactivated: {result['deactivated']}")
+            if result["rate_limited"]:
+                progress(f"    stopped early: rate limited by {result['rate_limited']}; the rest is tried next run")
             results.append(result)
     return results
 
@@ -604,7 +612,12 @@ def recover(conn: sqlite3.Connection, progress: Callable[[str], None] = logger.i
                     final_path=lambda path, final_dir=final_dir, staged=staged: final_dir / path.relative_to(staged),
                     author=source["name"] if source["kind"] == "user" else None,
                 )
-                candidates.record_posts(conn, posts)
+                # Credit the files to the source's last run (the interrupted one), so they show on the Latest page
+                last_run = conn.execute(
+                    "SELECT MAX(id) FROM runs WHERE source_id = ?;",
+                    (source["id"],),
+                ).fetchone()[0]
+                candidates.record_posts(conn, posts, last_run)
                 moved, skipped = move_staged(staged, destination(settings, source))
                 remove_empty_dirs(staged)
             report["files_recovered"] += moved

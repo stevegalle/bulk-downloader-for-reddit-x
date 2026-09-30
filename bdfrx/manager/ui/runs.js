@@ -2,7 +2,7 @@
 // per day), what needs attention, and the history of runs with their logs.
 
 import { cancel, keepWatching, refresh as refreshDownloads, subscribe } from "./activity.js";
-import { $, api, duration, h, number, redditLink, sinceShort, sourceLabel, storage, toast } from "./lib.js";
+import { $, api, duration, h, number, queuedMessage, redditLink, sinceShort, sourceLabel, storage, toast } from "./lib.js";
 import { openLog, setUpLogDialog } from "./logs.js";
 
 const PANEL_STORAGE = "bdfrx_manager_activity_open";
@@ -88,7 +88,7 @@ async function runAgain(run) {
   try {
     const { download: result, time } = await api(`/runs/${run.id}/again`, { method: "POST" });
     const label = sourceLabel(run.source_kind, run.source_name);
-    toast(result === "queued" ? `Queued ${label}${time ? ` (${time})` : ""}` : `${label} is already queued`);
+    toast(queuedMessage(result, label, time ? ` (${time})` : ""));
     refreshDownloads();
   } catch (e) {
     toast(`Could not run it again: ${e.message}`, { error: true });
@@ -142,7 +142,9 @@ function renderActivity(state) {
         {},
         label(job),
         trigger(job),
-        h("span", { class: "muted" }, `queued ${sinceShort(job.queued_at)}`),
+        job.not_before && new Date(`${job.not_before.replace(" ", "T")}Z`) > Date.now()
+          ? h("span", { class: "muted warn-text" }, `rate limited · waits until ${localTime(job.not_before)}`)
+          : h("span", { class: "muted" }, `queued ${sinceShort(job.queued_at)}`),
         h("button", { type: "button", class: "icon-button", title: "Cancel", "aria-label": `Cancel ${sourceLabel(job.kind, job.name)}`, onclick: () => cancel(job.id) }, "✕"),
       )),
     state.pending.length > WAITING_SHOWN
@@ -156,7 +158,7 @@ function renderActivity(state) {
         }, showAllWaiting ? "Show fewer" : `Show all ${number(state.pending.length)} waiting`))
       : null,
   );
-  const icons = { ok: "✓", failed: "✗", skipped: "–", cancelled: "⊘", deactivated: "!" };
+  const icons = { ok: "✓", failed: "✗", skipped: "–", cancelled: "⊘", deactivated: "!", "rate-limited": "⏸" };
   replaceWith(
     $("#activity-recent"),
     state.recent.slice(0, WAITING_SHOWN).map((job) =>
@@ -182,6 +184,8 @@ function renderActivity(state) {
   }
   seenFinished = finished;
 }
+
+const localTime = (timestamp) => new Date(`${timestamp.replace(" ", "T")}Z`).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
 function tickElapsed() {
   for (const el of document.querySelectorAll("#activity-running .elapsed")) el.textContent = duration(el.dataset.since);
@@ -363,7 +367,11 @@ async function loadAttention() {
           {},
           h("span", { class: "run-status failed" }, "✗"),
           h("span", { class: "job-name" }, sourceLabel(run.source_kind, run.source_name)),
-          h("span", { class: "muted" }, `${run.interrupted ? "interrupted by a restart · " : ""}${sinceShort(run.started_at)}`),
+          h(
+            "span",
+            { class: "muted" },
+            `${run.interrupted ? "interrupted by a restart · " : ""}${run.rate_limited ? "stopped by a site's rate limit, queued again · " : ""}${sinceShort(run.started_at)}`,
+          ),
           runLink(run),
           h("button", { type: "button", class: "link", onclick: () => runAgain(run) }, "run again"),
         )),
@@ -401,7 +409,7 @@ function attentionGroup(title, items) {
 async function queueSource(source) {
   try {
     const { download: result } = await api(`/sources/${source.kind}/${encodeURIComponent(source.name)}/download`, { method: "POST" });
-    toast(result === "queued" ? `Queued ${sourceLabel(source.kind, source.name)}` : `${sourceLabel(source.kind, source.name)} is already queued`);
+    toast(queuedMessage(result, sourceLabel(source.kind, source.name)));
     refreshDownloads();
   } catch (e) {
     toast(`Could not queue it: ${e.message}`, { error: true });

@@ -165,14 +165,25 @@
     </section>
 
     <section id="view-latest" class="view" hidden>
-      <form class="filters" id="latest-filters">
+      <form class="filters latest-filters" id="latest-filters">
         <fieldset class="segmented">
           <legend>Downloaded from</legend>
           <label><input type="radio" name="from" value="all" checked><span>Everything</span></label>
           <label><input type="radio" name="from" value="subreddit"><span>Subreddits</span></label>
           <label><input type="radio" name="from" value="user"><span>People you follow</span></label>
         </fieldset>
+        <fieldset class="segmented" id="latest-layout">
+          <legend>Show</legend>
+          <label><input type="radio" name="layout" value="groups" checked><span>By source</span></label>
+          <label><input type="radio" name="layout" value="flat"><span>Newest first</span></label>
+        </fieldset>
+        <label class="grow">Find a source
+          <input name="find" type="search" placeholder="Name" autocomplete="off" spellcheck="false">
+        </label>
       </form>
+      <nav class="source-tabs" id="latest-tabs" aria-label="Sources with downloads in the last 7 days"></nav>
+      <div class="latest-header" id="latest-header" hidden></div>
+      <div id="latest-groups"></div>
       <div id="latest-list" class="post-grid"></div>
       <div id="latest-sentinel" class="sentinel"></div>
       <p id="latest-status" class="status"></p>
