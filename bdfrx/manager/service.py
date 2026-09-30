@@ -30,6 +30,7 @@ DEFAULT_SETTINGS = {
     "history_db_subreddit": "",
     "log_dir": "",
     "run_timeout": "3600",
+    "ignored_folder": "ignored",
 }
 
 SETTING_HELP = {
@@ -47,7 +48,22 @@ SETTING_HELP = {
     "history_db_subreddit": "bdfrx --db-file for subreddit sources; empty uses bdfrx's default DB",
     "log_dir": "Where per-run logs and the lock file go; empty means <config dir>/manager",
     "run_timeout": "Seconds before a single bdfrx invocation is killed",
+    "ignored_folder": "Folder, beside users/ and subreddits/ in the archive, that set-aside files are moved into",
 }
+
+
+# Settings that name programs or paths the manager runs or writes to. Changing them over the network would let
+# anyone who can reach the API run arbitrary commands, so the API treats them as read-only.
+LOCAL_ONLY_SETTINGS = (
+    "dest_root",
+    "staging_root",
+    "bdfrx_command",
+    "bdfrx_config",
+    "history_db_user",
+    "history_db_subreddit",
+    "log_dir",
+    "ignored_folder",
+)
 
 
 class ManagerError(ValueError):
@@ -126,6 +142,12 @@ def set_setting(conn: sqlite3.Connection, key: str, value: Optional[str]) -> Non
         _check_choice(key, value, choices[key])
     if key == "run_timeout" and value is not None and not value.isdigit():
         raise ManagerError("run_timeout must be a whole number of seconds")
+    if (
+        key == "ignored_folder"
+        and value is not None
+        and (not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", value) or value in ("users", "subreddits"))
+    ):
+        raise ManagerError("ignored_folder must be a plain folder name other than users or subreddits")
     if value is None:
         conn.execute("DELETE FROM settings WHERE key = ?;", (key,))
     else:

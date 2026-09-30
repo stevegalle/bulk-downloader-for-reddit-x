@@ -23,6 +23,19 @@ class ParsedPost(TypedDict):
     subreddit: str
     score: Optional[int]
     posted_at: Optional[str]
+    files: list[str]
+
+
+FILE_KINDS = {
+    **dict.fromkeys(("jpg", "jpeg", "png", "gif", "webp"), "image"),
+    **dict.fromkeys(("mp4", "webm", "mov", "m4v"), "video"),
+    **dict.fromkeys(("m4a", "mp3", "ogg", "wav", "opus"), "audio"),
+    "txt": "text",
+}
+
+
+def file_kind(path: str) -> str:
+    return FILE_KINDS.get(path.rsplit(".", 1)[-1].lower(), "other") if "." in path else "other"
 
 
 def _name_pattern(subreddit: str) -> re.Pattern:
@@ -44,6 +57,7 @@ def parse_file_name(file_name: str, subreddit: str) -> Optional[ParsedPost]:
         "subreddit": subreddit,
         "score": int(match.group("score")) if match.group("score") else None,
         "posted_at": None,
+        "files": [],
     }
 
 
@@ -54,11 +68,18 @@ def _posted_at(path: Path) -> Optional[str]:
         return None
 
 
-def parse_files(paths: Iterable[Path], subreddit: str) -> tuple[list[ParsedPost], int]:
-    """Parse downloaded files into posts, one per post ID; returns (posts, number of unparseable files)"""
+def parse_files(
+    paths: Iterable[Path],
+    subreddit: str,
+    final_path: Callable[[Path], Path] = lambda path: path,
+) -> tuple[list[ParsedPost], int]:
+    """Parse downloaded files into posts, one per post ID; returns (posts, number of unparseable files).
+
+    final_path maps where a file is now to where it will end up, for files about to be moved out of staging.
+    """
     posts: dict[str, ParsedPost] = {}
     unparsed = 0
-    for path in paths:
+    for path in sorted(paths):
         post = parse_file_name(path.name, subreddit)
         if post is None:
             unparsed += 1
@@ -66,19 +87,25 @@ def parse_files(paths: Iterable[Path], subreddit: str) -> tuple[list[ParsedPost]
         if post["post_id"] not in posts:
             post["posted_at"] = _posted_at(path)
             posts[post["post_id"]] = post
+        posts[post["post_id"]]["files"].append(str(final_path(path)))
     return list(posts.values()), unparsed
 
 
 def record_posts(conn: sqlite3.Connection, posts: Iterable[ParsedPost], run_id: Optional[int] = None) -> int:
-    """Store posts not seen before; returns how many were new"""
-    before = conn.total_changes
+    """Store posts not seen before, and the files of every post given; returns how many posts were new"""
+    posts = list(posts)
+    before = conn.execute("SELECT COUNT(*) FROM posts;").fetchone()[0]
     conn.executemany(
         "INSERT OR IGNORE INTO posts (post_id, author, subreddit, score, posted_at, run_id) "
         "VALUES (:post_id, :author, :subreddit, :score, :posted_at, :run_id);",
         [{**post, "run_id": run_id} for post in posts],
     )
+    conn.executemany(
+        "INSERT OR IGNORE INTO post_files (post_id, path) VALUES (?, ?);",
+        [(post["post_id"], path) for post in posts for path in post["files"]],
+    )
     conn.commit()
-    return conn.total_changes - before
+    return conn.execute("SELECT COUNT(*) FROM posts;").fetchone()[0] - before
 
 
 def scan_archive(
@@ -87,11 +114,12 @@ def scan_archive(
     subreddits: Optional[list[str]] = None,
     progress: Callable[[str], None] = lambda _: None,
 ) -> dict[str, int]:
-    """Record posts from files already in <root>/subreddits/<name>/, skipping posts already recorded.
+    """Record posts from files already in <root>/subreddits/<name>/, skipping posts whose files are recorded.
 
     Every folder is scanned, whether or not it is a source, since old subreddits still show who posts there.
+    Posts recorded before file locations were kept get their files filled in.
     """
-    known = {row[0] for row in conn.execute("SELECT post_id FROM posts;")}
+    known = {row[0] for row in conn.execute("SELECT DISTINCT post_id FROM post_files;")}
     wanted = {name.lower() for name in subreddits or []}
     totals = {"folders": 0, "files": 0, "new_posts": 0, "unparsed": 0}
     folders = sorted(
@@ -129,6 +157,7 @@ def list_candidates(
     since: Optional[str] = None,
     subreddit: Optional[str] = None,
     limit: Optional[int] = None,
+    offset: int = 0,
 ) -> list[dict]:
     """Authors seen in subreddit downloads who are not user sources, ignored, or dismissed; most active first"""
     query = """
@@ -155,9 +184,9 @@ def list_candidates(
         query += " AND MAX(posted_at) >= ?"
         params.append(since)
     query += " ORDER BY posts DESC, total_score DESC, name COLLATE NOCASE"
-    if limit:
-        query += " LIMIT ?"
-        params.append(limit)
+    if limit or offset:
+        query += " LIMIT ? OFFSET ?"
+        params.extend((limit or -1, offset))
     candidates = [dict(row) for row in conn.execute(query, params)]
     for candidate in candidates:
         candidate["subreddits"] = sorted(candidate["subreddits"].split(","), key=str.lower)
@@ -211,3 +240,34 @@ def since_to_timestamp(since: str) -> str:
         return datetime.strptime(since.strip(), "%Y-%m-%d").strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
         raise service.ManagerError(f"{since!r} is not a period like 30d, 12w, 6m or a date like 2026-01-31")
+
+
+def _post_with_files(conn: sqlite3.Connection, post: sqlite3.Row) -> dict:
+    paths = [
+        row[0]
+        for row in conn.execute("SELECT path FROM post_files WHERE post_id = ? ORDER BY path;", (post["post_id"],))
+    ]
+    return {
+        **dict(post),
+        "files": [
+            {"index": index, "name": Path(path).name, "kind": file_kind(path)} for index, path in enumerate(paths)
+        ],
+    }
+
+
+def author_posts(conn: sqlite3.Connection, name: str, limit: int = 12) -> list[dict]:
+    """An author's most recent recorded posts, each with its files"""
+    rows = conn.execute(
+        "SELECT post_id, author, subreddit, score, posted_at FROM posts WHERE author = ? "
+        "ORDER BY posted_at DESC, post_id DESC LIMIT ?;",
+        (name, limit),
+    ).fetchall()
+    return [_post_with_files(conn, row) for row in rows]
+
+
+def post_file_path(conn: sqlite3.Connection, post_id: str, index: int) -> Path:
+    """The recorded path of a post's file; only recorded files can be looked up, never arbitrary paths"""
+    paths = [row[0] for row in conn.execute("SELECT path FROM post_files WHERE post_id = ? ORDER BY path;", (post_id,))]
+    if not 0 <= index < len(paths):
+        raise service.NotFoundError(f"Post {post_id} has no file {index}")
+    return Path(paths[index])

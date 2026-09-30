@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from bdfrx.manager import candidates, db, importer, runner, service
+from bdfrx.manager import candidates, db, importer, runner, service, setaside
 from bdfrx.manager.cli import cli
 
 
@@ -154,7 +154,9 @@ def test_build_command(conn: sqlite3.Connection):
     service.add_source(conn, "subreddit", "pics")
     settings = service.get_settings(conn)
     rules = {"ignore_user": ["spammer"], "skip_domain": ["example.com"], "skip_subreddit": ["boring"]}
-    user_cmd = runner.build_command(settings, service.get_source(conn, "user", "alice"), rules, Path("ids.txt"))
+    user_cmd = runner.build_command(
+        settings, service.get_source(conn, "user", "alice"), rules, {"exclude_post": Path("ids.txt")},
+    )
     assert user_cmd[3:6] == ["download", str(Path(settings["dest_root"], "users", "alice")), "--user"]
     assert "--submitted" in user_cmd
     assert "--filter-gender" not in user_cmd
@@ -184,6 +186,7 @@ def test_run_direct(conn: sqlite3.Connection, fake_bdfrx: Path, tmp_path: Path):
     assert results[0]["files_new"] == 2
     assert (tmp_path / "dest" / "users" / "alice" / "alice_post1.jpg").exists()
     assert (tmp_path / "logs" / "exclude_ids.txt").read_text() == "abc123\n"
+    assert not (tmp_path / "logs" / "ignore_users.txt").exists()
     assert "--exclude-id-file" in Path(results[0]["log_path"]).read_text()
 
     # A second run finds nothing new, since the fake rewrites the same files
@@ -305,7 +308,9 @@ def test_cli(tmp_path: Path, fake_bdfrx: Path):
     assert "alice" in listing
     assert "min_score=4" in listing
     assert "paused" in listing.split("bob")[1].splitlines()[0]
-    assert "--ignore-user bob" in invoke("run", "--dry-run")
+    plan = invoke("run", "--dry-run")
+    assert f"--ignore-user-file {tmp_path / 'logs' / 'ignore_users.txt'}" in plan
+    assert "--ignore-user bob" not in plan
     assert "1 source(s) run, 0 failed, 2 new file(s)" in invoke("run")
     assert "alice" in invoke("runs")
     assert "ARGS" in invoke("log", "1")
@@ -341,8 +346,22 @@ def test_parse_file_name_rejects(file_name: str, subreddit: str):
     assert candidates.parse_file_name(file_name, subreddit) is None
 
 
-def _post(post_id: str, author: str, subreddit: str = "pics", score: int = 1, posted_at: str = "2026-09-01 00:00:00"):
-    return {"post_id": post_id, "author": author, "subreddit": subreddit, "score": score, "posted_at": posted_at}
+def _post(
+    post_id: str,
+    author: str,
+    subreddit: str = "pics",
+    score: int = 1,
+    posted_at: str = "2026-09-01 00:00:00",
+    files: tuple[str, ...] = (),
+) -> dict:
+    return {
+        "post_id": post_id,
+        "author": author,
+        "subreddit": subreddit,
+        "score": score,
+        "posted_at": posted_at,
+        "files": list(files),
+    }
 
 
 def test_list_candidates_excludes_known_authors(conn: sqlite3.Connection):
@@ -479,3 +498,219 @@ def test_cli_candidates(tmp_path: Path):
     assert "active" in invoke("list", "--kind", "user")
     bad = cli_runner.invoke(cli, [*db_args, "candidates", "--since", "whenever"])
     assert bad.exit_code != 0
+
+
+def test_parse_files_groups_files_by_post(tmp_path: Path):
+    staging = tmp_path / "staging"
+    paths = [staging / "a_pics_aaa111_5.jpg", staging / "a_pics_aaa111_5_2.jpg", staging / "b_pics_bbb222.mp4"]
+    posts, unparsed = candidates.parse_files(
+        [*paths, staging / "junk.txt"],
+        "pics",
+        final_path=lambda path: tmp_path / "archive" / path.name,
+    )
+    assert unparsed == 1
+    by_id = {post["post_id"]: post for post in posts}
+    assert by_id["aaa111"]["files"] == [
+        str(tmp_path / "archive" / name) for name in ("a_pics_aaa111_5.jpg", "a_pics_aaa111_5_2.jpg")
+    ]
+    assert len(by_id["bbb222"]["files"]) == 1
+
+
+def test_author_posts_and_file_paths(conn: sqlite3.Connection):
+    candidates.record_posts(
+        conn,
+        [
+            _post("old111", "alice", posted_at="2026-01-01 00:00:00", files=("/a/old.jpg",)),
+            _post("new222", "alice", posted_at="2026-09-01 00:00:00", files=("/a/new_2.mp4", "/a/new_1.m4a")),
+            _post("bob333", "bob", files=("/b/x.txt",)),
+        ],
+    )
+    posts = candidates.author_posts(conn, "ALICE")
+    assert [p["post_id"] for p in posts] == ["new222", "old111"]
+    assert posts[0]["files"] == [
+        {"index": 0, "name": "new_1.m4a", "kind": "audio"},
+        {"index": 1, "name": "new_2.mp4", "kind": "video"},
+    ]
+    assert candidates.author_posts(conn, "alice", limit=1)[0]["post_id"] == "new222"
+    assert candidates.post_file_path(conn, "new222", 1) == Path("/a/new_2.mp4")
+    with pytest.raises(service.NotFoundError):
+        candidates.post_file_path(conn, "new222", 2)
+    with pytest.raises(service.NotFoundError):
+        candidates.post_file_path(conn, "nosuch", 0)
+
+
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    (
+        ("a.JPEG", "image"),
+        ("a.gif", "image"),
+        ("a.mp4", "video"),
+        ("a.m4a", "audio"),
+        ("a.txt", "text"),
+        ("a", "other"),
+    ),
+)
+def test_file_kind(name: str, kind: str):
+    assert candidates.file_kind(name) == kind
+
+
+def test_scan_fills_in_files_for_posts_recorded_without_them(conn: sqlite3.Connection, tmp_path: Path):
+    candidates.record_posts(conn, [_post("aaa111", "alice")])
+    folder = tmp_path / "archive" / "subreddits" / "pics"
+    folder.mkdir(parents=True)
+    (folder / "alice_pics_aaa111_10.jpg").write_text("x")
+    totals = candidates.scan_archive(conn, tmp_path / "archive")
+    assert totals["new_posts"] == 0
+    assert candidates.post_file_path(conn, "aaa111", 0) == folder / "alice_pics_aaa111_10.jpg"
+
+
+def test_staged_subreddit_run_records_final_paths(conn: sqlite3.Connection, fake_bdfrx: Path, tmp_path: Path):
+    use_fake(conn, fake_bdfrx)
+    service.set_setting(conn, "staging_root", str(tmp_path / "staging"))
+    service.add_source(conn, "subreddit", "pics")
+    runner.run(conn)
+    path = candidates.post_file_path(conn, "p0st01", 0)
+    assert path == tmp_path / "dest" / "subreddits" / "pics" / "Poster_One_pics_p0st01_12.jpg"
+    assert path.exists()
+
+
+# Setting aside ignored users' files
+
+
+@pytest.fixture
+def archive_with_alice(conn: sqlite3.Connection, tmp_path: Path) -> Path:
+    root = tmp_path / "dest"
+    names = {
+        "subreddits/pics/alice_pics_aaa111_10.jpg": "a1",
+        "subreddits/pics/alice_pics_aaa111_10_2.jpg": "a2",
+        "subreddits/cats/alice_cats_bbb222_3.mp4": "b",
+        "subreddits/pics/bob_pics_ccc333_1.jpg": "bob",
+        "users/alice/alice_dogs_ddd444_7.jpg": "own",
+    }
+    for relative, content in names.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    candidates.scan_archive(conn, root)
+    return root
+
+
+def test_set_aside_and_restore(conn: sqlite3.Connection, archive_with_alice: Path):
+    root = archive_with_alice
+    aside = root / "ignored" / "alice"
+    assert setaside.file_count(conn, "alice") == 4
+    assert setaside.set_aside(conn, "u/alice", dry_run=True) == {"moved": 4, "skipped": []}
+    assert (root / "subreddits/pics/alice_pics_aaa111_10.jpg").exists()
+
+    assert setaside.set_aside(conn, "alice") == {"moved": 4, "skipped": []}
+    assert sorted(str(p.relative_to(aside)) for p in aside.rglob("*") if p.is_file()) == [
+        "subreddits/cats/alice_cats_bbb222_3.mp4",
+        "subreddits/pics/alice_pics_aaa111_10.jpg",
+        "subreddits/pics/alice_pics_aaa111_10_2.jpg",
+        "users/alice/alice_dogs_ddd444_7.jpg",
+    ]
+    assert (aside / "subreddits/pics/alice_pics_aaa111_10_2.jpg").read_text() == "a2"
+    assert (root / "subreddits/pics/bob_pics_ccc333_1.jpg").exists()
+    assert not (root / "subreddits/pics/alice_pics_aaa111_10.jpg").exists()
+    # Previews follow the files
+    assert candidates.post_file_path(conn, "aaa111", 0) == aside / "subreddits/pics/alice_pics_aaa111_10.jpg"
+    assert setaside.list_set_aside(conn)[0]["files"] == 4
+    # Running again finds nothing left to move and reports nothing odd
+    assert setaside.set_aside(conn, "alice") == {"moved": 0, "skipped": []}
+
+    (aside / "subreddits/cats/alice_cats_bbb222_3.mp4").unlink()  # deleted during review
+    summary = setaside.restore(conn, "alice")
+    assert summary["moved"] == 3
+    assert len(summary["skipped"]) == 1
+    assert "deleted after review" in summary["skipped"][0]
+    assert (root / "subreddits/pics/alice_pics_aaa111_10.jpg").read_text() == "a1"
+    assert (root / "users/alice/alice_dogs_ddd444_7.jpg").read_text() == "own"
+    assert candidates.post_file_path(conn, "aaa111", 0) == root / "subreddits/pics/alice_pics_aaa111_10.jpg"
+    assert not aside.exists()
+    assert setaside.list_set_aside(conn) == []
+
+
+def test_set_aside_never_overwrites(conn: sqlite3.Connection, archive_with_alice: Path):
+    root = archive_with_alice
+    occupied = root / "ignored/alice/subreddits/pics/alice_pics_aaa111_10.jpg"
+    occupied.parent.mkdir(parents=True)
+    occupied.write_text("already here")
+    (root / "subreddits/cats/alice_cats_bbb222_3.mp4").unlink()
+    summary = setaside.set_aside(conn, "alice")
+    assert summary["moved"] == 2
+    assert sorted(reason.split(": ")[1].split(" ")[0] for reason in summary["skipped"]) == [
+        str(occupied),
+        "no",
+    ]
+    assert occupied.read_text() == "already here"
+    assert (root / "subreddits/pics/alice_pics_aaa111_10.jpg").read_text() == "a1"
+
+
+def test_restore_errors(conn: sqlite3.Connection, archive_with_alice: Path):
+    with pytest.raises(service.NotFoundError):
+        setaside.restore(conn, "alice")
+    setaside.set_aside(conn, "alice")
+    blocker = archive_with_alice / "subreddits/pics/alice_pics_aaa111_10.jpg"
+    blocker.write_text("new download")
+    summary = setaside.restore(conn, "alice")
+    assert summary["moved"] == 3
+    assert "already exists" in summary["skipped"][0]
+    assert blocker.read_text() == "new download"
+
+
+def test_ignored_folder_setting(conn: sqlite3.Connection, archive_with_alice: Path):
+    for bad in ("../elsewhere", "users", "a/b", ""):
+        with pytest.raises(service.ManagerError):
+            service.set_setting(conn, "ignored_folder", bad)
+    service.set_setting(conn, "ignored_folder", "_review")
+    setaside.set_aside(conn, "alice")
+    assert (archive_with_alice / "_review/alice/subreddits/pics/alice_pics_aaa111_10.jpg").exists()
+
+
+def test_cli_ignore_set_aside(tmp_path: Path):
+    cli_runner = CliRunner()
+    db_args = ["--db", str(tmp_path / "cli.db")]
+    root = tmp_path / "archive"
+    folder = root / "subreddits" / "pics"
+    folder.mkdir(parents=True)
+    (folder / "alice_pics_aaa111_10.jpg").write_text("x")
+
+    def invoke(*args: str) -> str:
+        result = cli_runner.invoke(cli, [*db_args, *args], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    invoke("config", "set", "dest_root", str(root))
+    invoke("scan-archive")
+    assert "1 file(s) would move" in invoke("set-aside", "alice", "--dry-run")
+    output = invoke("ignore", "alice", "--set-aside")
+    assert "ignoring user alice" in output
+    assert "1 file(s) moved" in output
+    assert "alice" in invoke("set-aside")
+    assert "1 file(s) restored" in invoke("restore", "alice")
+    assert (folder / "alice_pics_aaa111_10.jpg").exists()
+
+
+def test_ignored_users_go_in_a_file(conn: sqlite3.Connection, fake_bdfrx: Path, tmp_path: Path):
+    use_fake(conn, fake_bdfrx)
+    service.add_source(conn, "subreddit", "pics")
+    for name in ("Spammer", "reposter", "bot_account"):
+        service.ignore_user(conn, name)
+    [result] = runner.run(conn)
+    assert (tmp_path / "logs" / "ignore_users.txt").read_text().split() == ["bot_account", "reposter", "Spammer"]
+    assert f"--ignore-user-file {tmp_path / 'logs' / 'ignore_users.txt'}" in result["command"]
+    assert "--ignore-user " not in result["command"]
+
+
+def test_build_command_rule_files(conn: sqlite3.Connection, tmp_path: Path):
+    service.add_source(conn, "subreddit", "pics")
+    source = service.get_source(conn, "subreddit", "pics")
+    rules = {"ignore_user": ["a", "b"], "exclude_post": ["abc123"]}
+    files = runner.rule_files(tmp_path, rules)
+    assert files == {"exclude_post": tmp_path / "exclude_ids.txt", "ignore_user": tmp_path / "ignore_users.txt"}
+    cmd = runner.build_command(service.get_settings(conn), source, rules, files)
+    assert cmd[cmd.index("--ignore-user-file") + 1] == str(tmp_path / "ignore_users.txt")
+    assert cmd[cmd.index("--exclude-id-file") + 1] == str(tmp_path / "exclude_ids.txt")
+    assert "--ignore-user" not in cmd
+    runner.write_rule_files(files, rules)
+    assert (tmp_path / "ignore_users.txt").read_text() == "a\nb\n"

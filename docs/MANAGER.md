@@ -63,7 +63,9 @@ bdfrx-manager show user some_user                    # overrides, effective opti
 
 ### Rules
 
-Rules apply to every run, not just one source.
+Rules apply to every run, not just one source. Ignored users and excluded posts are written to `ignore_users.txt` and
+`exclude_ids.txt` in `log_dir` before each run and passed to bdfrx as `--ignore-user-file` / `--exclude-id-file`, so the
+lists can grow to any length without growing the command line. Ignored users match regardless of capitalization.
 
 ```bash
 bdfrx-manager ignore some_user --reason "reposts"    # never download their posts anywhere; pauses them as a source
@@ -94,8 +96,34 @@ bdfrx-manager candidates undismiss someone
 bdfrx-manager candidates dismissed
 ```
 
+Each post's file locations are recorded too, so the API can serve them as previews; it only ever serves files it
+has recorded. `scan-archive` fills in locations for posts recorded before they were kept.
+
 `scan-archive` only reads file names and dates. It skips posts already recorded, so it can be stopped and run again,
 and `--subreddit` limits it to some folders. Over the network it takes about a minute per 45,000 files.
+
+## Setting aside an ignored user's files
+
+Ignoring someone stops new downloads but leaves their files where they are. To move them out of the way for review,
+without deleting anything:
+
+```bash
+bdfrx-manager ignore someone --set-aside       # ignore and move their files in one step
+bdfrx-manager set-aside someone --dry-run      # count what would move
+bdfrx-manager set-aside someone                # move (does not ignore them)
+bdfrx-manager set-aside                        # list users with files set aside
+bdfrx-manager restore someone                  # move everything back (does not unignore them)
+```
+
+Files move to `<archive>/<ignored_folder>/<user>/`, keeping their `subreddits/<name>/` or `users/<name>/` path, where
+`<archive>` is the folder holding the file's `subreddits/` folder and `ignored_folder` defaults to `ignored`. Moves
+stay on the same filesystem, so they are renames: instant, and dates are kept. Nothing is ever overwritten: a file
+whose target already exists is skipped and reported. Every move is recorded, so `restore` puts files back exactly;
+files you deleted during review are noted and no longer tracked. Previews keep working while files are set aside.
+
+It moves the files the manager knows about: every post recorded by runs or `scan-archive`, plus the whole
+`users/<user>/` folder if they were followed. In the web UI, **Ignore** offers the same move as a checkbox, and its
+**Undo** restores the files too.
 
 ## Running
 
@@ -126,8 +154,36 @@ Example crontab, every six hours:
 bdfrx-manager serve --host 0.0.0.0 --port 8765
 ```
 
-Interactive docs are at `http://<host>:8765/docs`. The API has no authentication, so only expose it on a trusted
-network.
+Interactive docs are at `http://<host>:8765/docs` (and `/` redirects there).
+
+Set an API key when serving beyond localhost: with `--api-key` or `$BDFRX_MANAGER_API_KEY` set, every request must
+send it in an `X-API-Key` header (the docs page has an **Authorize** button for it), or in a `bdfrx_manager_key`
+cookie, which is how the UI authorizes `<img>` and `<video>` requests that can't carry headers. Settings that name commands or
+paths (`dest_root`, `staging_root`, `bdfrx_command`, `bdfrx_config`, `history_db_*`, `log_dir`) and per-source
+`extra_args` are read-only over the API whether or not a key is set; change them on the server with
+`bdfrx-manager config set` / `bdfrx-manager set`.
+
+To keep it running as a systemd user service (with lingering enabled, it starts at boot):
+
+```ini
+# ~/.config/systemd/user/bdfrx-manager-api.service
+[Unit]
+Description=bdfrx manager API
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/bdfrx/api.env        # BDFRX_MANAGER_API_KEY=..., chmod 600
+ExecStart=%h/bdfrx/bin/bdfrx-manager serve --host 0.0.0.0 --port 8765
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now bdfrx-manager-api
+journalctl --user -u bdfrx-manager-api -f
+```
 
 | Method | Path                         | Purpose                                              |
 |--------|------------------------------|------------------------------------------------------|
@@ -147,7 +203,13 @@ network.
 | GET    | `/runs/{id}/log`             | Full bdfrx output                                    |
 | POST   | `/runs`                      | Start a run in the background (`dry_run` returns the plan) |
 | GET    | `/candidates`                | Candidate users (`?min_posts=`, `?since=`, `?subreddit=`, `?limit=`) |
+| GET    | `/candidates/{name}/posts`   | Their recent posts, each file with a `url` (`?limit=`) |
 | POST   | `/candidates/{name}/promote` | Add as an active user source                         |
 | GET    | `/candidates/dismissed`      | Dismissed users                                      |
 | PUT    | `/candidates/{name}/dismissed` | Dismiss (optional `{"reason": ...}`)               |
 | DELETE | `/candidates/{name}/dismissed` | Undismiss                                          |
+| GET    | `/set-aside`                 | Users with files set aside                           |
+| GET    | `/set-aside/{name}`          | How many of their files would move                   |
+| POST   | `/set-aside/{name}`          | Move their files into the ignored folder             |
+| DELETE | `/set-aside/{name}`          | Restore their set-aside files                        |
+| GET    | `/posts/{id}/files/{n}`      | A recorded file of a post (supports `Range`, so video can seek) |

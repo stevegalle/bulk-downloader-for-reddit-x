@@ -82,8 +82,33 @@ CREATE TABLE IF NOT EXISTS dismissed_authors (
 );
 """
 
+# Where each post's files are, so the UI can preview them. Paths are absolute, as found when recorded.
+_SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS post_files (
+    post_id TEXT NOT NULL REFERENCES posts (post_id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    PRIMARY KEY (post_id, path)
+);
+"""
+
+# Files moved aside when their author was ignored, so they can be reviewed, deleted by hand, or restored
+_SCHEMA_V4 = """
+CREATE TABLE IF NOT EXISTS set_aside (
+    id INTEGER PRIMARY KEY,
+    author TEXT NOT NULL COLLATE NOCASE,
+    post_id TEXT,
+    from_path TEXT NOT NULL,
+    to_path TEXT NOT NULL,
+    moved_at TEXT NOT NULL DEFAULT (datetime('now')),
+    restored_at TEXT,
+    gone_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS set_aside_author ON set_aside (author);
+"""
+
 # Index i holds the script that upgrades a database from version i to version i + 1
-_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2)
+_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4)
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 

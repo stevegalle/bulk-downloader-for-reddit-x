@@ -9,16 +9,22 @@ pytest.importorskip("httpx")
 
 from fastapi.testclient import TestClient
 
+from bdfrx.manager import db, service
 from bdfrx.manager.api import create_app
 from tests.test_manager import fake_bdfrx  # noqa: F401
 
 
+def _configure(db_path: Path, **settings: str) -> None:
+    conn = db.connect(db_path)
+    for key, value in settings.items():
+        service.set_setting(conn, key, value)
+    conn.close()
+
+
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
-    test_client = TestClient(create_app(tmp_path / "api.db"))
-    for key, value in (("log_dir", tmp_path / "logs"), ("dest_root", tmp_path / "dest")):
-        assert test_client.put(f"/settings/{key}", json={"value": str(value)}).status_code == 200
-    return test_client
+    _configure(tmp_path / "api.db", log_dir=str(tmp_path / "logs"), dest_root=str(tmp_path / "dest"))
+    return TestClient(create_app(tmp_path / "api.db"))
 
 
 def test_sources(client: TestClient):
@@ -56,14 +62,15 @@ def test_rules(client: TestClient):
 
 def test_settings(client: TestClient):
     settings = client.get("/settings").json()
-    assert settings["default_sort"] == {"value": "new", "default": "new", "help": settings["default_sort"]["help"]}
+    assert settings["default_sort"]["value"] == settings["default_sort"]["default"] == "new"
+    assert settings["default_sort"]["editable"] is True
     assert client.put("/settings/default_sort", json={"value": "top"}).json() == {"default_sort": "top"}
     assert client.put("/settings/default_sort", json={"value": None}).json() == {"default_sort": "new"}
     assert client.put("/settings/nope", json={"value": "x"}).status_code == 400
 
 
-def test_runs(client: TestClient, fake_bdfrx: Path):  # noqa: F811
-    client.put("/settings/bdfrx_command", json={"value": f"{sys.executable} {fake_bdfrx}"})
+def test_runs(client: TestClient, fake_bdfrx: Path, tmp_path: Path):  # noqa: F811
+    _configure(tmp_path / "api.db", bdfrx_command=f"{sys.executable} {fake_bdfrx}")
     client.post("/sources", json={"kind": "user", "name": "alice"})
     plan = client.post("/runs", json={"dry_run": True}).json()
     assert plan[0]["name"] == "alice"
@@ -85,7 +92,7 @@ def test_candidates(client: TestClient, tmp_path: Path):
     folder.mkdir(parents=True)
     for name in ("alice_pics_aaa111_10.jpg", "alice_pics_aaa222_3.jpg", "bob_pics_bbb111_1.jpg"):
         (folder / name).write_text("x")
-    from bdfrx.manager import candidates, db
+    from bdfrx.manager import candidates
 
     conn = db.connect(tmp_path / "api.db")
     candidates.scan_archive(conn, tmp_path / "dest")
@@ -93,6 +100,7 @@ def test_candidates(client: TestClient, tmp_path: Path):
 
     assert [c["name"] for c in client.get("/candidates").json()] == ["alice", "bob"]
     assert [c["name"] for c in client.get("/candidates", params={"min_posts": 2}).json()] == ["alice"]
+    assert [c["name"] for c in client.get("/candidates", params={"limit": 1, "offset": 1}).json()] == ["bob"]
     assert client.get("/candidates", params={"since": "whenever"}).status_code == 400
     assert client.put("/candidates/bob/dismissed", json={"reason": "meh"}).status_code == 204
     assert client.get("/candidates/dismissed").json()[0]["reason"] == "meh"
@@ -100,3 +108,91 @@ def test_candidates(client: TestClient, tmp_path: Path):
     assert client.get("/candidates").json() == []
     assert client.delete("/candidates/bob/dismissed").status_code == 204
     assert client.delete("/candidates/bob/dismissed").status_code == 404
+
+
+def test_local_only_settings_are_read_only(client: TestClient):
+    for key in service.LOCAL_ONLY_SETTINGS:
+        response = client.put(f"/settings/{key}", json={"value": "/somewhere/else"})
+        assert response.status_code == 403, key
+        assert client.get("/settings").json()[key]["editable"] is False
+    assert client.get("/settings").json()["default_sort"]["editable"] is True
+
+
+def test_extra_args_not_writable(client: TestClient):
+    assert client.post("/sources", json={"kind": "user", "name": "alice", "extra_args": "--log /x"}).status_code == 422
+    client.post("/sources", json={"kind": "user", "name": "alice"})
+    assert client.patch("/sources/user/alice", json={"extra_args": "--log /x"}).status_code == 422
+    assert client.get("/sources/user/alice").json()["extra_args"] is None
+
+
+def test_api_key(tmp_path: Path):
+    keyed = TestClient(create_app(tmp_path / "keyed.db", api_key="s3cret"))
+    assert keyed.get("/status").status_code == 401
+    assert keyed.get("/status", headers={"X-API-Key": "wrong"}).status_code == 401
+    assert keyed.get("/status", headers={"X-API-Key": "s3cret"}).status_code == 200
+    assert keyed.get("/docs").status_code == 200
+    assert keyed.get("/", follow_redirects=False).headers["location"] == "/ui/"
+    assert keyed.get("/ui/").status_code == 200
+    open_app = TestClient(create_app(tmp_path / "open.db"))
+    assert open_app.get("/status").status_code == 200
+    assert open_app.get("/", follow_redirects=False).headers["location"] == "/ui/"
+
+
+def _media_setup(tmp_path: Path) -> Path:
+    folder = tmp_path / "dest" / "subreddits" / "pics"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "alice_pics_aaa111_10.jpg").write_bytes(b"0123456789" * 100)
+    (folder / "alice_pics_aaa111_10_2.jpg").write_bytes(b"second")
+    from bdfrx.manager import candidates
+
+    conn = db.connect(tmp_path / "api.db")
+    candidates.scan_archive(conn, tmp_path / "dest")
+    conn.close()
+    return folder
+
+
+def test_candidate_posts_and_files(client: TestClient, tmp_path: Path):
+    folder = _media_setup(tmp_path)
+    [post] = client.get("/candidates/alice/posts").json()
+    assert post["post_id"] == "aaa111"
+    assert [(f["name"], f["kind"], f["url"]) for f in post["files"]] == [
+        ("alice_pics_aaa111_10.jpg", "image", "/posts/aaa111/files/0"),
+        ("alice_pics_aaa111_10_2.jpg", "image", "/posts/aaa111/files/1"),
+    ]
+    response = client.get("/posts/aaa111/files/0")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert len(response.content) == 1000
+
+    partial = client.get("/posts/aaa111/files/0", headers={"Range": "bytes=10-19"})
+    assert partial.status_code == 206
+    assert partial.content == b"0123456789"
+
+    assert client.get("/posts/aaa111/files/2").status_code == 404
+    assert client.get("/posts/nosuch/files/0").status_code == 404
+    (folder / "alice_pics_aaa111_10_2.jpg").unlink()
+    assert "offline" in client.get("/posts/aaa111/files/1").text
+
+
+def test_media_key_cookie(tmp_path: Path):
+    _configure(tmp_path / "api.db", log_dir=str(tmp_path / "logs"), dest_root=str(tmp_path / "dest"))
+    _media_setup(tmp_path)
+    keyed = TestClient(create_app(tmp_path / "api.db", api_key="s3cret"))
+    assert keyed.get("/posts/aaa111/files/0").status_code == 401
+    keyed.cookies.set("bdfrx_manager_key", "wrong")
+    assert keyed.get("/posts/aaa111/files/0").status_code == 401
+    keyed.cookies.set("bdfrx_manager_key", "s3cret")
+    assert keyed.get("/posts/aaa111/files/0").status_code == 200
+
+
+def test_set_aside_endpoints(client: TestClient, tmp_path: Path):
+    folder = _media_setup(tmp_path)
+    assert client.get("/set-aside/alice").json() == {"files": 2, "skipped": []}
+    assert client.post("/set-aside/alice").json() == {"moved": 2, "skipped": []}
+    assert not (folder / "alice_pics_aaa111_10.jpg").exists()
+    assert client.get("/set-aside").json()[0]["author"] == "alice"
+    # Previews still work from the new location
+    assert client.get("/posts/aaa111/files/0").status_code == 200
+    assert client.delete("/set-aside/alice").json() == {"moved": 2, "skipped": []}
+    assert (folder / "alice_pics_aaa111_10.jpg").exists()
+    assert client.delete("/set-aside/alice").status_code == 404

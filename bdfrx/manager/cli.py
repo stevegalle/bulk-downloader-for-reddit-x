@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 import click
 
-from bdfrx.manager import candidates, db, importer, runner, service
+from bdfrx.manager import candidates, db, importer, runner, service, setaside
 
 KIND = click.Choice(service.SOURCE_KINDS)
 CLEAR = "default"
@@ -252,13 +252,63 @@ def cli_import_dirs(context: click.Context, root: Path, dry_run: bool) -> None:
 @cli.command("ignore")
 @click.argument("users", nargs=-1, required=True)
 @click.option("--reason")
+@click.option(
+    "--set-aside",
+    "move_files",
+    is_flag=True,
+    help="Also move their downloaded files into the ignored folder",
+)
 @click.pass_context
-def cli_ignore(context: click.Context, users: tuple[str], reason: Optional[str]) -> None:
+def cli_ignore(context: click.Context, users: tuple[str], reason: Optional[str], move_files: bool) -> None:
     """Never download posts by these users, in any run. Pauses them if they are sources."""
     for user in users:
         try:
             rule = service.ignore_user(_conn(context), user, reason)
             click.echo(f"ignoring user {rule['value']}")
+        except service.ManagerError as e:
+            click.echo(f"skipped: {e}", err=True)
+            continue
+        if move_files:
+            _echo_set_aside(rule["value"], setaside.set_aside(_conn(context), rule["value"]), "moved")
+
+
+def _echo_set_aside(name: str, summary: setaside.Summary, verb: str) -> None:
+    click.echo(f"{name}: {summary['moved']} file(s) {verb}, {len(summary['skipped'])} skipped")
+    for reason in summary["skipped"]:
+        click.echo(f"    skipped {reason}", err=True)
+
+
+@cli.command("set-aside")
+@click.argument("users", nargs=-1)
+@click.option("--dry-run", is_flag=True, help="Count what would move without moving anything")
+@click.pass_context
+def cli_set_aside(context: click.Context, users: tuple[str], dry_run: bool) -> None:
+    """Move users' downloaded files into <archive>/<ignored_folder>/<user>/ for review. Nothing is deleted.
+
+    With no USERS, lists users whose files are currently set aside.
+    """
+    conn = _conn(context)
+    if not users:
+        entries = setaside.list_set_aside(conn)
+        for entry in entries:
+            click.echo(f"{entry['author']:<24} {entry['files']:>6} file(s)  since {entry['first_moved'][:10]}")
+        click.echo(f"{len(entries)} user(s) with files set aside", err=True)
+        return
+    for user in users:
+        try:
+            _echo_set_aside(user, setaside.set_aside(conn, user, dry_run=dry_run), "would move" if dry_run else "moved")
+        except service.ManagerError as e:
+            click.echo(f"skipped: {e}", err=True)
+
+
+@cli.command("restore")
+@click.argument("users", nargs=-1, required=True)
+@click.pass_context
+def cli_restore(context: click.Context, users: tuple[str]) -> None:
+    """Move users' set-aside files back where they were. Does not unignore them."""
+    for user in users:
+        try:
+            _echo_set_aside(user, setaside.restore(_conn(context), user), "restored")
         except service.ManagerError as e:
             click.echo(f"skipped: {e}", err=True)
 
@@ -602,18 +652,32 @@ def cli_status(context: click.Context) -> None:
 
 
 @cli.command("serve")
-@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--host", default="127.0.0.1", show_default=True, help="0.0.0.0 to accept connections from the network")
 @click.option("--port", default=8765, show_default=True)
+@click.option(
+    "--api-key",
+    envvar="BDFRX_MANAGER_API_KEY",
+    help="Require this key in an X-API-Key header on every request (or set $BDFRX_MANAGER_API_KEY)",
+)
 @click.pass_context
-def cli_serve(context: click.Context, host: str, port: int) -> None:
-    """Serve the HTTP API (needs the 'manager' extra: pip install 'bdfrx[manager]')."""
+def cli_serve(context: click.Context, host: str, port: int, api_key: Optional[str]) -> None:
+    """Serve the HTTP API (needs the 'manager' extra: pip install 'bdfrx[manager]').
+
+    Settings that name commands or paths, and per-source extra_args, are read-only over the API;
+    change them with 'bdfrx-manager config set' on the server.
+    """
     try:
         import uvicorn
 
         from bdfrx.manager.api import create_app
     except ImportError as e:
         raise click.ClickException(f"{e}. Install the API dependencies with: pip install 'bdfrx[manager]'")
-    uvicorn.run(create_app(context.obj["db_path"]), host=host, port=port)
+    if host not in ("127.0.0.1", "localhost", "::1") and not api_key:
+        click.echo(
+            f"Warning: serving on {host} without an API key; anyone who can reach this port can use it",
+            err=True,
+        )
+    uvicorn.run(create_app(context.obj["db_path"], api_key), host=host, port=port)
 
 
 if __name__ == "__main__":

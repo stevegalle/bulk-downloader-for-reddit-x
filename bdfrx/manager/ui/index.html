@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>bdfrx manager</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="brand">bdfrx <span>manager</span></h1>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#candidates" data-tab="candidates">Candidates</a>
+      <a href="#sources" data-tab="sources">Sources</a>
+      <a href="#runs" data-tab="runs">Runs</a>
+      <a href="#rules" data-tab="rules">Rules</a>
+      <a href="#settings" data-tab="settings">Settings</a>
+    </nav>
+    <button type="button" class="ghost key-button" id="key-button" title="Change API key">Key</button>
+  </header>
+
+  <main id="main">
+    <section id="view-candidates" class="view" hidden>
+      <form class="filters" id="candidate-filters">
+        <label>Min posts
+          <select name="min_posts">
+            <option>1</option><option>2</option><option>3</option><option>5</option>
+            <option>10</option><option>20</option><option>50</option>
+          </select>
+        </label>
+        <label>Posted since
+          <select name="since">
+            <option value="">Any time</option>
+            <option value="7d">7 days</option>
+            <option value="30d">30 days</option>
+            <option value="90d">90 days</option>
+            <option value="12m">1 year</option>
+          </select>
+        </label>
+        <label class="grow">Subreddit
+          <input name="subreddit" list="subreddit-names" placeholder="Any" autocomplete="off" spellcheck="false">
+          <datalist id="subreddit-names"></datalist>
+        </label>
+      </form>
+      <div id="candidate-list" class="cards"></div>
+      <div id="candidate-sentinel" class="sentinel"></div>
+      <p id="candidate-status" class="status"></p>
+    </section>
+
+    <section id="view-placeholder" class="view placeholder" hidden>
+      <h2 id="placeholder-title"></h2>
+      <p>Coming next. Until then, this section is available in the <a href="/docs">API docs</a>.</p>
+    </section>
+  </main>
+
+  <nav class="bottom-tabs" aria-label="Sections">
+    <a href="#candidates" data-tab="candidates">Candidates</a>
+    <a href="#sources" data-tab="sources">Sources</a>
+    <a href="#runs" data-tab="runs">Runs</a>
+    <a href="#rules" data-tab="rules">Rules</a>
+    <a href="#settings" data-tab="settings">Settings</a>
+  </nav>
+
+  <dialog id="key-dialog" class="key-dialog">
+    <form method="dialog" id="key-form">
+      <h2>API key</h2>
+      <p id="key-message">This server needs its API key. It is in <code>api.env</code> on the server.</p>
+      <input type="password" name="key" autocomplete="current-password" placeholder="Paste the key" required>
+      <div class="dialog-actions">
+        <button type="button" class="ghost" id="key-forget">Forget key</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="ignore-dialog" class="key-dialog">
+    <form method="dialog">
+      <h2 id="ignore-title">Ignore</h2>
+      <p>Nothing new by them will be downloaded, in any subreddit. Files already downloaded stay unless you move them.</p>
+      <label class="check">
+        <input type="checkbox" name="set_aside" id="ignore-set-aside">
+        <span id="ignore-set-aside-label">Also move their downloaded files aside for review</span>
+      </label>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" class="ghost">Cancel</button>
+        <button type="submit" value="ignore" class="primary">Ignore</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="viewer" class="viewer" aria-label="Post viewer">
+    <div class="viewer-stage" id="viewer-stage"></div>
+    <button type="button" class="viewer-nav prev" id="viewer-prev" aria-label="Previous">&#8249;</button>
+    <button type="button" class="viewer-nav next" id="viewer-next" aria-label="Next">&#8250;</button>
+    <div class="viewer-bar">
+      <span id="viewer-info"></span>
+      <span class="viewer-bar-right">
+        <span id="viewer-count"></span>
+        <button type="button" class="ghost" id="viewer-close" aria-label="Close">Close</button>
+      </span>
+    </div>
+  </dialog>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
