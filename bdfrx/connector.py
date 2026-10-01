@@ -7,13 +7,14 @@ import platform
 import re
 import shutil
 import sqlite3
+import time
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
 from time import sleep
-from typing import Union
+from typing import Optional, Union
 
 import appdirs
 import praw
@@ -76,6 +77,11 @@ class RedditConnector(metaclass=ABCMeta):
         logger.log(9, "Created time filter")
         self.sort_filter = self.create_sort_filter()
         logger.log(9, "Created sort filter")
+        self.since = self.parse_since(self.args.since)
+        time_filtered = (RedditTypes.SortType.TOP, RedditTypes.SortType.CONTROVERSIAL)
+        if self.since is not None and self.sort_filter in time_filtered:
+            self.time_filter = self.time_filter_covering(self.since)
+            logger.debug(f"Using time filter {self.time_filter.value} to cover --since")
         self.file_name_formatter = self.create_file_name_formatter()
         logger.log(9, "Create file name formatter")
 
@@ -407,7 +413,55 @@ class RedditConnector(metaclass=ABCMeta):
         sort_function = self.determine_sort_function()
         if self.sort_filter in (RedditTypes.SortType.TOP, RedditTypes.SortType.CONTROVERSIAL):
             return sort_function(reddit_source, limit=self.args.limit, time_filter=self.time_filter.value)
-        return sort_function(reddit_source, limit=self.args.limit)
+        listing = sort_function(reddit_source, limit=self.args.limit)
+        if self.since is not None and self.sort_filter is RedditTypes.SortType.NEW:
+            return self.stop_at_since(listing, self.since)
+        return listing
+
+    @staticmethod
+    def stop_at_since(listing: Iterator, since: float) -> Iterator:
+        """A newest-first listing up to the first submission older than since"""
+        for submission in listing:
+            if submission.created_utc < since:
+                logger.debug(f"Reached submission {submission.id} from before --since, stopping this listing")
+                return
+            yield submission
+
+    @staticmethod
+    def parse_since(value: Optional[str]) -> Optional[float]:
+        """--since as a UTC timestamp: Unix seconds, 'YYYY-MM-DD', or 'YYYY-MM-DD HH:MM:SS' (a T and a trailing Z
+        are fine)"""
+        if not value:
+            return None
+        text = value.strip()
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(text.removesuffix("Z"), pattern)
+            except ValueError:
+                continue
+            return parsed.replace(tzinfo=timezone.utc).timestamp()
+        raise errors.BulkDownloaderException(
+            f"Could not read --since {value!r}; use a date like 2026-09-30 or 2026-09-30 12:00:00",
+        )
+
+    @staticmethod
+    def time_filter_covering(since: float, now: Optional[float] = None) -> RedditTypes.TimeType:
+        """The narrowest Reddit time filter reaching back to since"""
+        age = (now if now is not None else time.time()) - since
+        for time_type, seconds in (
+            (RedditTypes.TimeType.HOUR, 3600),
+            (RedditTypes.TimeType.DAY, 86400),
+            (RedditTypes.TimeType.WEEK, 7 * 86400),
+            (RedditTypes.TimeType.MONTH, 31 * 86400),
+            (RedditTypes.TimeType.YEAR, 366 * 86400),
+        ):
+            if age <= seconds:
+                return time_type
+        return RedditTypes.TimeType.ALL
 
     def get_user_data(self) -> list[Iterator]:
         if any([self.args.downvoted, self.args.saved, self.args.submitted, self.args.upvoted]):

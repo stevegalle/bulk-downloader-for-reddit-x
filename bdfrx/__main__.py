@@ -39,6 +39,7 @@ _common_options = [
     click.option("--opts", type=str, default=None),
     click.option("--saved", is_flag=True, default=None),
     click.option("--search", type=str, default=None),
+    click.option("--since", type=str, default=None),
     click.option(
         "-S",
         "--sort",

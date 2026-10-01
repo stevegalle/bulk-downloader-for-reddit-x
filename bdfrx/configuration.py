@@ -43,6 +43,7 @@ class Configuration(Namespace):
         self.opts: Optional[str] = None
         self.saved: bool = False
         self.search: Optional[str] = None
+        self.since: Optional[str] = None
         self.search_existing: bool = False
         self.skip: list[str] = []
         self.skip_domain: list[str] = []

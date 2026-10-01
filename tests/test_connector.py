@@ -465,6 +465,64 @@ def test_load_db_creates_missing_folders(tmp_path: Path):
     assert {"hash", "post_id", "link"} <= tables
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (None, None),
+        ("", None),
+        ("1759190400", 1759190400.0),
+        ("2025-09-30", 1759190400.0),
+        ("2025-09-30 12:00:00", 1759233600.0),
+        ("2025-09-30T12:00:00Z", 1759233600.0),
+    ),
+)
+def test_parse_since(value: str, expected: float):
+    assert RedditConnector.parse_since(value) == expected
+
+
+def test_parse_since_rejects_nonsense():
+    with pytest.raises(BulkDownloaderException):
+        RedditConnector.parse_since("last tuesday")
+
+
+@pytest.mark.parametrize(
+    ("age_seconds", "expected"),
+    (
+        (600, RedditTypes.TimeType.HOUR),
+        (5 * 3600, RedditTypes.TimeType.DAY),
+        (3 * 86400, RedditTypes.TimeType.WEEK),
+        (20 * 86400, RedditTypes.TimeType.MONTH),
+        (200 * 86400, RedditTypes.TimeType.YEAR),
+        (900 * 86400, RedditTypes.TimeType.ALL),
+    ),
+)
+def test_time_filter_covering(age_seconds: int, expected: RedditTypes.TimeType):
+    now = 2_000_000_000
+    assert RedditConnector.time_filter_covering(now - age_seconds, now=now) == expected
+
+
+def test_stop_at_since():
+    posts = [MagicMock(id=name, created_utc=created) for name, created in (("a", 300), ("b", 200), ("c", 100), ("d", 50))]
+    assert [p.id for p in RedditConnector.stop_at_since(iter(posts), since=150)] == ["a", "b"]
+    assert [p.id for p in RedditConnector.stop_at_since(iter(posts), since=0)] == ["a", "b", "c", "d"]
+
+
+@pytest.mark.parametrize(
+    ("sort", "stops_early"),
+    ((RedditTypes.SortType.NEW, True), (RedditTypes.SortType.HOT, False)),
+)
+def test_listing_stops_at_since_only_when_newest_first(sort: RedditTypes.SortType, stops_early: bool):
+    connector = MagicMock()
+    connector.sort_filter = sort
+    connector.since = 150
+    connector.args.limit = None
+    connector.stop_at_since = RedditConnector.stop_at_since
+    posts = [MagicMock(id=name, created_utc=created) for name, created in (("a", 300), ("old", 100), ("b", 200))]
+    connector.determine_sort_function.return_value = lambda source, limit: iter(posts)
+    listing = RedditConnector.create_filtered_listing_generator(connector, MagicMock())
+    assert [p.id for p in listing] == (["a"] if stops_early else ["a", "old", "b"])
+
+
 def test_read_ignored_users(tmp_path: Path):
     test_file = tmp_path / "ignored.txt"
     test_file.write_text("# people to skip\nAlice\n\n  bob  \nDELETED\n")

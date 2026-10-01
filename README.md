@@ -220,6 +220,11 @@ In cases when the same option is specified both in the YAML file and in as a com
     - This will make BDFRx compile the hashes for every file in `directory`
     - The hashes are used to skip duplicate files if `--no-dupes` is supplied or make hard links if `--make-hard-links` is supplied
     - **The use of this option is highly discouraged due to inefficiency**
+- `--since`
+    - Only fetch submissions posted since this time: Unix seconds, `YYYY-MM-DD`, or `YYYY-MM-DD HH:MM:SS` (UTC)
+    - With `--sort new` the listing stops at the first older submission, so a regular run reads only the new part
+    - With `--sort top` or `controversial` it picks the narrowest `--time` window covering it
+    - Other sorts aren't in date order and ignore it
 - `--skip`
     - This adds file types to the download filter i.e. submissions with one of the supplied file extensions will not be downloaded
     - Can be specified multiple times
