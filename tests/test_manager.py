@@ -1256,3 +1256,50 @@ def test_attention_leaves_out_failures_made_up_for(conn: sqlite3.Connection):
             )
     conn.commit()
     assert [r["source_name"] for r in insights.attention(conn)["failed_runs"]] == ["still_broken"]
+
+
+# Incremental runs
+
+
+def _ok_run(conn: sqlite3.Connection, source: dict, started_at: str, status: str = "ok") -> None:
+    conn.execute(
+        "INSERT INTO runs (source_id, source_kind, source_name, started_at, status) VALUES (?, ?, ?, ?, ?);",
+        (source["id"], source["kind"], source["name"], started_at, status),
+    )
+    conn.commit()
+
+
+def test_since_for(conn: sqlite3.Connection):
+    alice = service.add_source(conn, "user", "alice")
+    settings = service.get_settings(conn)
+    assert runner.since_for(conn, settings, alice) is None  # never run: read everything
+    _ok_run(conn, alice, "2026-09-20 06:00:00")
+    _ok_run(conn, alice, "2026-09-28 06:00:00", status="failed")  # failures don't count
+    assert runner.since_for(conn, settings, alice) == "2026-09-18 06:00:00"  # last success less 48 hours
+    assert runner.since_for(conn, settings, alice, "all") is None
+    week = runner.since_for(conn, settings, alice, "week")
+    assert week.startswith(runner._hours_ago(7 * 24)[:13])
+
+    service.set_setting(conn, "incremental_overlap_hours", "6")
+    assert runner.since_for(conn, service.get_settings(conn), alice) == "2026-09-20 00:00:00"
+    service.set_setting(conn, "incremental_runs", "false")
+    assert runner.since_for(conn, service.get_settings(conn), alice) is None
+    for key, bad in (("incremental_runs", "maybe"), ("incremental_overlap_hours", "-2")):
+        with pytest.raises(service.ManagerError):
+            service.set_setting(conn, key, bad)
+
+
+def test_runs_pass_since(conn: sqlite3.Connection, fake_bdfrx: Path):
+    use_fake(conn, fake_bdfrx)
+    service.add_source(conn, "user", "alice")
+    first = runner.run_one(conn, "user", "alice")
+    assert "--since" not in first["command"]
+    second = runner.run_one(conn, "user", "alice")
+    assert (
+        f"--since '{runner.since_for(conn, service.get_settings(conn), service.get_source(conn, 'user', 'alice'))}'"
+        in second["command"]
+    )
+    seed = runner.run_one(conn, "user", "alice", time_override="all")
+    assert "--since" not in seed["command"]
+    [plan] = runner.run(conn, dry_run=True)
+    assert "--since" in plan["command"]

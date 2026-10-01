@@ -2,6 +2,7 @@
 
 import re
 import sqlite3
+from collections.abc import Callable
 from typing import Any, Optional
 
 SOURCE_KINDS = ("user", "subreddit")
@@ -36,6 +37,8 @@ DEFAULT_SETTINGS = {
     "run_every_hours": "0",
     "log_retention_days": "2",
     "rate_limit_backoff_minutes": "30",
+    "incremental_runs": "true",
+    "incremental_overlap_hours": "48",
 }
 
 SETTING_HELP = {
@@ -60,6 +63,10 @@ SETTING_HELP = {
     "log_retention_days": "Days to keep each run's full log file; results and the last lines stay in the DB for good",
     "rate_limit_backoff_minutes": "A download stopped by a site's rate limit goes to the back of the queue, not to "
     "start again for this long",
+    "incremental_runs": "Runs only read posts since the source's last successful run (true/false); first runs and "
+    "all-time downloads read everything",
+    "incremental_overlap_hours": "How far before the last successful run an incremental run starts reading, to catch "
+    "posts that showed up late",
 }
 
 
@@ -163,39 +170,51 @@ def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
+_SETTING_CHOICES = {
+    "default_sort": SORTS,
+    "default_time": TIMES,
+    "default_filter_gender": GENDERS,
+    "follow_download_time": TIMES,
+}
+
+
+def _whole_number(low: int = 0, high: Optional[int] = None) -> Callable[[str], bool]:
+    return lambda v: v.isdigit() and int(v) >= low and (high is None or int(v) <= high)
+
+
+def _schedule_hours(value: str) -> bool:
+    try:
+        hours = float(value)
+    except ValueError:
+        return False
+    return hours == 0 or hours >= 0.25  # noqa: PLR2004
+
+
+# Setting -> (check, what the value must be)
+_SETTING_CHECKS: dict[str, tuple[Callable[[str], bool], str]] = {
+    "run_timeout": (_whole_number(), "must be a whole number of seconds"),
+    "incremental_overlap_hours": (_whole_number(), "must be a whole number of hours"),
+    "incremental_runs": (lambda v: v.lower() in ("true", "false"), "must be true or false"),
+    "rate_limit_backoff_minutes": (_whole_number(1), "must be a whole number of minutes, at least 1"),
+    "log_retention_days": (_whole_number(1), "must be a whole number of days, at least 1"),
+    "max_concurrent_downloads": (_whole_number(1, 8), "must be a whole number from 1 to 8"),
+    "run_every_hours": (_schedule_hours, "must be 0 (off) or at least 0.25"),
+    "ignored_folder": (
+        lambda v: bool(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", v)) and v not in ("users", "subreddits"),
+        "must be a plain folder name other than users or subreddits",
+    ),
+}
+
+
 def set_setting(conn: sqlite3.Connection, key: str, value: Optional[str]) -> None:
     """Set a setting; None restores the default"""
     if key not in DEFAULT_SETTINGS:
         raise ManagerError(f"Unknown setting {key!r}; expected one of {', '.join(DEFAULT_SETTINGS)}")
-    choices = {
-        "default_sort": SORTS,
-        "default_time": TIMES,
-        "default_filter_gender": GENDERS,
-        "follow_download_time": TIMES,
-    }
-    if key in choices:
-        _check_choice(key, value, choices[key])
-    if key == "run_timeout" and value is not None and not value.isdigit():
-        raise ManagerError("run_timeout must be a whole number of seconds")
-    if key == "rate_limit_backoff_minutes" and value is not None and not (value.isdigit() and int(value) >= 1):
-        raise ManagerError("rate_limit_backoff_minutes must be a whole number of minutes, at least 1")
-    if key == "log_retention_days" and value is not None and not (value.isdigit() and int(value) >= 1):
-        raise ManagerError("log_retention_days must be a whole number of days, at least 1")
-    if key == "max_concurrent_downloads" and value is not None and not (value.isdigit() and 1 <= int(value) <= 8):
-        raise ManagerError("max_concurrent_downloads must be a whole number from 1 to 8")
-    if key == "run_every_hours" and value is not None:
-        try:
-            hours = float(value)
-        except ValueError:
-            hours = -1
-        if hours < 0 or (0 < hours < 0.25):  # noqa: PLR2004
-            raise ManagerError("run_every_hours must be 0 (off) or at least 0.25")
-    if (
-        key == "ignored_folder"
-        and value is not None
-        and (not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", value) or value in ("users", "subreddits"))
-    ):
-        raise ManagerError("ignored_folder must be a plain folder name other than users or subreddits")
+    if value is not None:
+        if key in _SETTING_CHOICES:
+            _check_choice(key, value, _SETTING_CHOICES[key])
+        if key in _SETTING_CHECKS and not _SETTING_CHECKS[key][0](value):
+            raise ManagerError(f"{key} {_SETTING_CHECKS[key][1]}")
     if value is None:
         conn.execute("DELETE FROM settings WHERE key = ?;", (key,))
     else:

@@ -205,6 +205,12 @@ When a site keeps refusing with HTTP 429 (three files in a row from the same hos
 `rate_limit_backoff_minutes` (default 30); nothing it couldn't fetch was recorded as done, so the next run gets it.
 Asking for it by hand (Download now) lifts the wait.
 
+Runs are incremental: each passes bdfrx `--since` set to the start of the source's last successful run, less
+`incremental_overlap_hours` (default 48) to catch posts that appear late. With `--sort new` bdfrx then stops reading at
+the first older post, so a routine run reads one page of the listing instead of everything Reddit lists (about 1,000
+posts). A source's first run, and any all-time download (following someone, "Download all time"), read everything; an
+explicit window ("last week") reads back that far. `incremental_runs false` turns this off.
+
 With `run_every_hours` set (e.g. `6`; `0` is off), the server queues every active source that often, least recently
 run first. The time it last did so is kept in the database, so restarting the server doesn't reset it.
 

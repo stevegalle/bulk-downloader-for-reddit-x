@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -123,6 +123,40 @@ def default_bdfrx_command() -> list[str]:
     return [str(script)] if script.is_file() else [sys.executable, "-m", "bdfrx"]
 
 
+_WINDOW_HOURS = {"hour": 1, "day": 24, "week": 7 * 24, "month": 31 * 24, "year": 366 * 24}
+
+
+def since_for(
+    conn: sqlite3.Connection,
+    settings: dict[str, str],
+    source: dict,
+    time_override: Optional[str] = None,
+) -> Optional[str]:
+    """How far back a run should read, as a --since timestamp, or None to read everything Reddit lists.
+
+    An explicit time window (e.g. "last week" from Download now) reads back that far, and "all" reads everything.
+    Otherwise, with incremental_runs on, a run reads back to the start of the source's last successful run, less
+    incremental_overlap_hours to catch posts that appear late; a source that never succeeded reads everything.
+    """
+    if time_override:
+        hours = _WINDOW_HOURS.get(time_override)
+        return _hours_ago(hours) if hours else None
+    if settings["incremental_runs"].lower() != "true":
+        return None
+    last_ok = conn.execute(
+        "SELECT MAX(started_at) FROM runs WHERE source_id = ? AND status = 'ok';",
+        (source["id"],),
+    ).fetchone()[0]
+    if last_ok is None:
+        return None
+    start = datetime.strptime(last_ok, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    return (start - timedelta(hours=int(settings["incremental_overlap_hours"]))).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _hours_ago(hours: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def build_command(  # noqa: PLR0912
     settings: dict[str, str],
     source: dict,
@@ -130,9 +164,10 @@ def build_command(  # noqa: PLR0912
     files: Optional[dict[str, Path]] = None,
     sort_override: Optional[str] = None,
     time_override: Optional[str] = None,
+    since: Optional[str] = None,
 ) -> list[str]:
     """The bdfrx command for a source. Rules in files are passed by file; without a file, ignored users are
-    passed one by one and excluded posts are left out."""
+    passed one by one and excluded posts are left out. since (see since_for) limits it to newer posts."""
     files = files or {}
     opts = effective_options(settings, source)
     cmd = shlex.split(settings["bdfrx_command"]) if settings["bdfrx_command"] else default_bdfrx_command()
@@ -144,6 +179,8 @@ def build_command(  # noqa: PLR0912
         cmd += ["--subreddit", source["name"]]
 
     cmd += ["--sort", sort_override or opts["sort"], "--time", time_override or opts["time"]]
+    if since:
+        cmd += ["--since", since]
     cmd += ["--file-scheme", settings["file_scheme"], "--folder-scheme", settings["folder_scheme"]]
     if settings["authenticate"].lower() in ("1", "true", "yes"):
         cmd.append("--authenticate")
@@ -375,7 +412,15 @@ def _run_source(  # noqa: PLR0913
     on_start: Optional[Callable[[int], None]],
     trigger: str,
 ) -> dict:
-    cmd = build_command(settings, source, rules, files, sort_override, time_override)
+    cmd = build_command(
+        settings,
+        source,
+        rules,
+        files,
+        sort_override,
+        time_override,
+        since_for(conn, settings, source, time_override),
+    )
     download_dir = download_directory(settings, source)
     download_dir.mkdir(parents=True, exist_ok=True)
     before = _files_in(download_dir)
@@ -500,7 +545,17 @@ def run(
             cmd = (
                 None
                 if reason
-                else shlex.join(build_command(settings, source, rules, files, sort_override, time_override))
+                else shlex.join(
+                    build_command(
+                        settings,
+                        source,
+                        rules,
+                        files,
+                        sort_override,
+                        time_override,
+                        since_for(conn, settings, source, time_override),
+                    ),
+                )
             )
             planned.append({"kind": source["kind"], "name": source["name"], "skipped": reason, "command": cmd})
         return planned
