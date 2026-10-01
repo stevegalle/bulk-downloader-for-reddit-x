@@ -7,8 +7,11 @@ wrapper scripts.
 ## Install
 
 ```bash
-pip install -e '.[manager]'   # the [manager] extra adds FastAPI/uvicorn for the HTTP API; the CLI works without it
+uv sync --locked --extra manager   # exact versions from uv.lock; the [manager] extra adds the web server
 ```
+
+`pip install -e '.[manager]'` works too, without the pinned versions. For a full setup on a new machine (Reddit
+login, data, settings, the service) or moving an existing one, see [INSTALL.md](INSTALL.md).
 
 The database lives at `~/.config/bdfrx/manager.db` unless `--db` or `$BDFRX_MANAGER_DB` says otherwise.
 
