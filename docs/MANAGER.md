@@ -214,6 +214,11 @@ the first older post, so a routine run reads one page of the listing instead of 
 posts). A source's first run, and any all-time download (following someone, "Download all time"), read everything; an
 explicit window ("last week") reads back that far. `incremental_runs false` turns this off.
 
+Known limits: a file that failed temporarily is retried by later runs only while its post is inside their window, so
+an old post (first reached by a full read) whose file failed may not be retried; and Reddit lists at most about 1,000
+posts, which a full read can't go past and an incremental run could only hit for a source posting more than that
+between runs. "Download all time" on a source re-reads everything Reddit lists and fills such gaps.
+
 With `run_every_hours` set (e.g. `6`; `0` is off), the server queues every active source that often, least recently
 run first. With `run_at` set (local time, e.g. `01:00`) it runs at that time and every `run_every_hours` from there,
 restarting from `run_at` each day, in the machine's local time zone; a time missed by more than 3 hours (the server was
