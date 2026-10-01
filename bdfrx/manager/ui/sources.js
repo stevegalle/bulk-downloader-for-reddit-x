@@ -38,6 +38,7 @@ const page = {
 };
 
 const keyOf = (source) => `${source.kind}/${source.name.toLowerCase()}`;
+const galleryHash = (source) => `#gallery/${source.kind === "user" ? "u" : "r"}/${encodeURIComponent(source.name)}`;
 const sourcePath = (source) => `/sources/${source.kind}/${encodeURIComponent(source.name)}`;
 
 // Showing and hiding the page
@@ -195,7 +196,15 @@ function sourceCard(source) {
   const card = h("article", { class: "source-card", "data-key": keyOf(source) });
   const thumb = h(
     "button",
-    { type: "button", class: "thumb", "data-src": `${sourcePath(source)}/thumbnail`, title: "Details", onclick: () => openSheet(card.source) },
+    {
+      type: "button",
+      class: "thumb",
+      "data-src": `${sourcePath(source)}/thumbnail`,
+      title: "Open gallery",
+      onclick: () => {
+        location.hash = galleryHash(card.source);
+      },
+    },
     h("span", { class: "initial", "aria-hidden": "true" }, source.name.replace(/^[_-]+/, "").slice(0, 1).toUpperCase() || "?"),
   );
   card.append(thumb, h("div", { class: "source-body" }));
@@ -509,6 +518,8 @@ async function openSheet(source) {
     h("a", { href: redditLink(source.kind, source.name), target: "_blank", rel: "noopener noreferrer" }, sourceLabel(source.kind, source.name)),
     " ",
     h("span", { class: `pill status-${source.status}` }, source.status),
+    " ",
+    h("a", { class: "see-all small", href: galleryHash(source), onclick: () => sheet.close() }, "Open gallery →"),
   );
   const thumb = $("#sheet-thumb");
   thumb.replaceChildren();

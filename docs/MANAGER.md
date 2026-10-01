@@ -232,6 +232,9 @@ off) waits for the next one rather than catching up. The time it last did so is 
 - **Sources**: every source with a random thumbnail each visit, stats, Download now (normal, last week, all time),
   Pause/Resume, Edit (settings, stats, recent runs, and for users the subreddits they post in, to follow or skip),
   Ignore and Remove; Add and Run all active
+- **Gallery** (click a source's thumbnail on Sources, or "Open gallery" in its Edit panel or Latest tab): everything in
+  the source's archive folder, newest post first (by post ID), gallery posts grouped, filter images or videos, open in
+  the full-screen viewer; `#gallery/u/name` or `#gallery/r/name`. Only files inside that source's own folder are served
 - **Latest**: what runs downloaded, newest first. Posts from subreddits offer Follow/Ignore for their author; posts
   from people you follow offer Follow/Skip for their subreddit
 - **Runs**: the activity panel (downloading, waiting, recently finished, with live logs and cancel); a summary of the
@@ -312,6 +315,8 @@ journalctl --user -u bdfrx-manager-api -f
 | POST   | `/sources/{kind}/{name}/download` | Download one source now, in the background (`?time=`) |
 | GET    | `/downloads`                 | The queue: running (with files so far), waiting, recently finished |
 | DELETE | `/downloads/{id}`            | Cancel a waiting download (`DELETE /downloads` cancels all) |
+| GET    | `/sources/{kind}/{name}/gallery` | Posts in the source's folder, newest first (`?offset=`, `?limit=`, `?order=`, `?media=`) |
+| GET    | `/sources/{kind}/{name}/files/{file}` | A file from the source's folder (`/thumbnail` for a preview) |
 | GET    | `/sources/{kind}/{name}/thumbnail` | A small preview of a random image or video of theirs |
 | GET    | `/posts/{id}/files/{n}/thumbnail` | A small preview of one file                     |
 | GET    | `/candidates/{name}/posts`   | Their recent posts, each file with a `url` (`?limit=`) |

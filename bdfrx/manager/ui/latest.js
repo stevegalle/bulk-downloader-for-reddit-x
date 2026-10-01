@@ -187,6 +187,7 @@ function renderHeader() {
     h("a", { class: "latest-title", href: redditLink(source.kind, source.name), target: "_blank", rel: "noopener noreferrer" }, sourceLabel(source.kind, source.name)),
     info?.status ? h("span", { class: `pill status-${info.status}` }, info.status) : null,
     h("span", { class: "muted" }, info ? `${number(info.posts)} downloaded in the last ${DAYS} days · latest ${sinceShort(info.last_found)}` : `nothing downloaded in the last ${DAYS} days; older downloads below`),
+    h("a", { class: "see-all", href: `#gallery/${source.kind === "user" ? "u" : "r"}/${encodeURIComponent(source.name)}` }, "Gallery →"),
     h("button", { type: "button", class: "pin-button", "aria-pressed": String(pinned), onclick: () => togglePin(source) }, pinned ? "★ Pinned" : "☆ Pin"),
   );
 }

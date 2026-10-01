@@ -4,17 +4,20 @@ import contextlib
 import logging
 import secrets
 import sqlite3
-from collections.abc import Iterator
+import urllib.parse
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Union
 
+import anyio
+import anyio.to_thread
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, Security
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.security import APIKeyCookie, APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from bdfrx.manager import candidates, db, insights, jobs, runner, service, setaside, thumbs
+from bdfrx.manager import candidates, db, gallery, insights, jobs, runner, service, setaside, thumbs
 from bdfrx.manager.jobs import DownloadQueue, schedule_due_at
 
 logger = logging.getLogger(__name__)
@@ -123,6 +126,14 @@ def create_app(  # noqa: PLR0915
 
     Conn = Annotated[sqlite3.Connection, Depends(get_conn)]  # noqa: N806
 
+    # Thumbnails wait for ffmpeg (two at a time) and read a network share. Waiting in the request's own worker thread
+    # would let a gallery's worth of thumbnails occupy every worker and stall the rest of the API, so they run on a
+    # few threads of their own and wait for those without holding a worker.
+    thumbnail_threads = anyio.CapacityLimiter(4)
+
+    async def in_thumbnail_thread(function: Callable, *args: object) -> object:
+        return await anyio.to_thread.run_sync(function, *args, limiter=thumbnail_threads)
+
     @app.exception_handler(service.ManagerError)
     def manager_error(_request, error: service.ManagerError) -> Response:
         status = 400
@@ -203,17 +214,71 @@ def create_app(  # noqa: PLR0915
         return {"download": downloads.add(kind, source["name"], time, trigger="manual")}
 
     @app.get("/sources/{kind}/{name}/thumbnail", response_class=FileResponse)
-    def source_thumbnail(kind: SourceKind, name: str, conn: Conn) -> FileResponse:
+    async def source_thumbnail(kind: SourceKind, name: str, conn: Conn) -> FileResponse:
         """A small preview of a random image or video from the source's archive folder; different each time"""
         source = service.get_source(conn, kind, name)
         settings = service.get_settings(conn)
-        found = thumbs.random_thumbnail(runner.destination(settings, source), runner.log_dir(settings) / "thumbs")
+        found = await in_thumbnail_thread(
+            thumbs.random_thumbnail,
+            runner.destination(settings, source),
+            runner.log_dir(settings) / "thumbs",
+        )
         if found is None:
             raise HTTPException(
                 404,
                 "No images or videos to preview" if thumbs.ffmpeg_available() else "ffmpeg is missing",
             )
         return FileResponse(found, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    # A source's gallery: everything in its archive folder
+
+    def source_folder(conn: sqlite3.Connection, kind: str, name: str) -> tuple[dict, Path]:
+        source = service.get_source(conn, kind, name)
+        return source, runner.destination(service.get_settings(conn), source)
+
+    @app.get("/sources/{kind}/{name}/gallery")
+    def source_gallery(  # noqa: PLR0913
+        kind: SourceKind,
+        name: str,
+        conn: Conn,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(60, ge=1, le=500),
+        order: Literal["newest", "oldest"] = "newest",
+        media: Literal["all", "images", "videos"] = "all",
+    ) -> dict:
+        """Posts in the source's archive folder, newest first (by post ID), each file with a url"""
+        source, folder = source_folder(conn, kind, name)
+        page = gallery.gallery_page(folder, kind, source["name"], offset, limit, order, media)
+        base = f"/sources/{kind}/{urllib.parse.quote(source['name'])}/files"
+        for post in page["posts"]:
+            for file in post["files"]:
+                file["url"] = f"{base}/{urllib.parse.quote(file['name'])}"
+        return page
+
+    @app.get("/sources/{kind}/{name}/files/{file_name}", response_class=FileResponse)
+    def source_file(kind: SourceKind, name: str, file_name: str, conn: Conn) -> FileResponse:
+        """A file from the source's archive folder (only that folder). Supports range requests."""
+        _, folder = source_folder(conn, kind, name)
+        path = gallery.file_in_folder(folder, file_name)
+        if path is None:
+            raise HTTPException(404, "No such file in this source's folder")
+        return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
+
+    @app.get("/sources/{kind}/{name}/files/{file_name}/thumbnail", response_class=FileResponse)
+    async def source_file_thumbnail(kind: SourceKind, name: str, file_name: str, conn: Conn) -> FileResponse:
+        _, folder = source_folder(conn, kind, name)
+        path = await in_thumbnail_thread(gallery.file_in_folder, folder, file_name)
+        if path is None:
+            raise HTTPException(404, "No such file in this source's folder")
+        try:
+            found = await in_thumbnail_thread(
+                thumbs.thumbnail,
+                path,
+                runner.log_dir(service.get_settings(conn)) / "thumbs",
+            )
+        except thumbs.ThumbnailError as e:
+            raise HTTPException(404, str(e))
+        return FileResponse(found, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
 
     @app.get("/downloads")
     def list_downloads(conn: Conn) -> dict:
@@ -339,13 +404,17 @@ def create_app(  # noqa: PLR0915
     # Post files
 
     @app.get("/posts/{post_id}/files/{index}/thumbnail", response_class=FileResponse)
-    def post_file_thumbnail(post_id: str, index: int, conn: Conn) -> FileResponse:
+    async def post_file_thumbnail(post_id: str, index: int, conn: Conn) -> FileResponse:
         """A small JPEG preview of a post's image or video file"""
         path = candidates.post_file_path(conn, post_id, index)
-        if not path.is_file():
+        if not await in_thumbnail_thread(path.is_file):
             raise HTTPException(404, f"File no longer at {path.name}")
         try:
-            found = thumbs.thumbnail(path, runner.log_dir(service.get_settings(conn)) / "thumbs")
+            found = await in_thumbnail_thread(
+                thumbs.thumbnail,
+                path,
+                runner.log_dir(service.get_settings(conn)) / "thumbs",
+            )
         except thumbs.ThumbnailError as e:
             raise HTTPException(404, str(e))
         return FileResponse(found, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})

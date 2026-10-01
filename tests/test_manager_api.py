@@ -718,3 +718,46 @@ def test_schedule_at_a_fixed_local_time(tmp_path: Path, pacific_time):  # noqa: 
         with pytest.raises(service.ManagerError):
             service.set_setting(conn, "run_at", bad)
     conn.close()
+
+
+def test_source_gallery(client: TestClient, tmp_path: Path):
+    from bdfrx.manager import gallery
+
+    folder = tmp_path / "dest" / "users" / "alice"
+    folder.mkdir(parents=True)
+    files = {
+        "alice_cats_1aaaaa_5.jpg": "old",
+        "alice_dog_pics_1zzzzz_9_1.mp4": "new gallery 1",
+        "alice_dog_pics_1zzzzz_9_2.jpg": "new gallery 2",
+        "alice_u_alice_1mmmmm.png": "middle",
+        "notes.txt": "not in the scheme",
+        ".hidden": "skipped",
+    }
+    for file_name, content in files.items():
+        (folder / file_name).write_text(content)
+    (tmp_path / "secret.txt").write_text("outside the folder")
+    client.post("/sources", json={"kind": "user", "name": "alice"})
+
+    page = client.get("/sources/user/alice/gallery").json()
+    assert (page["total_posts"], page["total_files"]) == (4, 5)
+    assert [p["post_id"] for p in page["posts"]] == ["1zzzzz", "1mmmmm", "1aaaaa", None]
+    newest = page["posts"][0]
+    assert (newest["subreddit"], newest["score"]) == ("dog_pics", 9)
+    assert [(f["index"], f["kind"]) for f in newest["files"]] == [(0, "video"), (1, "image")]
+    assert newest["files"][1]["url"] == "/sources/user/alice/files/alice_dog_pics_1zzzzz_9_2.jpg"
+    assert client.get(newest["files"][1]["url"]).text == "new gallery 2"
+
+    oldest = client.get("/sources/user/alice/gallery", params={"order": "oldest", "limit": 1}).json()
+    assert oldest["posts"][0]["post_id"] is None  # names outside the scheme sort last, so first when reversed
+    videos = client.get("/sources/user/alice/gallery", params={"media": "videos"}).json()
+    assert [p["post_id"] for p in videos["posts"]] == ["1zzzzz"]
+    assert (
+        client.get("/sources/user/alice/gallery", params={"offset": 1, "limit": 1}).json()["posts"][0]["post_id"]
+        == "1mmmmm"
+    )
+
+    # Only files directly inside the source's own folder
+    for bad in ("..%2Fsecret.txt", "%2E%2E%2F%2E%2E%2Fsecret.txt", ".hidden", "nope.jpg"):
+        assert client.get(f"/sources/user/alice/files/{bad}").status_code == 404, bad
+    assert gallery.file_in_folder(folder, "../../secret.txt") is None
+    assert client.get("/sources/user/nobody/gallery").status_code == 404

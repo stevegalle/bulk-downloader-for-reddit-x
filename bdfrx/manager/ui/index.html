@@ -189,6 +189,31 @@
       <p id="latest-status" class="status"></p>
     </section>
 
+    <section id="view-gallery" class="view" hidden>
+      <div class="gallery-head">
+        <a class="back-link" href="#sources">← Sources</a>
+        <h2 id="gallery-title" class="gallery-title"></h2>
+        <span class="muted" id="gallery-count"></span>
+        <a class="see-all" id="gallery-latest" href="#latest">Latest downloads →</a>
+      </div>
+      <form class="filters" id="gallery-filters">
+        <fieldset class="segmented">
+          <legend>Show</legend>
+          <label><input type="radio" name="media" value="all" checked><span>Everything</span></label>
+          <label><input type="radio" name="media" value="images"><span>Images</span></label>
+          <label><input type="radio" name="media" value="videos"><span>Videos</span></label>
+        </fieldset>
+        <fieldset class="segmented">
+          <legend>Order</legend>
+          <label><input type="radio" name="order" value="newest" checked><span>Newest first</span></label>
+          <label><input type="radio" name="order" value="oldest"><span>Oldest first</span></label>
+        </fieldset>
+      </form>
+      <div id="gallery-grid" class="gallery-grid"></div>
+      <div id="gallery-sentinel" class="sentinel"></div>
+      <p id="gallery-status" class="status"></p>
+    </section>
+
     <section id="view-settings" class="view" hidden>
       <div id="settings-body"><p class="muted">Loading…</p></div>
     </section>

@@ -31,9 +31,17 @@ function renderViewer() {
   stage.replaceChildren(content);
 
   const gallery = post.files.length > 1 ? ` · image ${file.index + 1} of ${post.files.length}` : "";
+  // Leave out what isn't known (files from the archive have no recorded post date, some names carry no post ID)
+  const details = [
+    post.score !== null && post.score !== undefined ? `score ${number(post.score)}` : null,
+    post.posted_at ? timeAgo(post.posted_at) : null,
+  ].filter(Boolean);
   $("#viewer-info").replaceChildren(
-    h("a", { href: `https://www.reddit.com/comments/${post.post_id}/`, target: "_blank", rel: "noopener noreferrer" }, `r/${post.subreddit}`),
-    ` · score ${number(post.score)} · ${timeAgo(post.posted_at)}${gallery}`,
+    post.post_id
+      ? h("a", { href: `https://www.reddit.com/comments/${post.post_id}/`, target: "_blank", rel: "noopener noreferrer" }, `r/${post.subreddit}`)
+      : file.name,
+    details.length ? ` · ${details.join(" · ")}` : "",
+    gallery,
   );
   $("#viewer-count").textContent = `${viewer.index + 1} / ${viewer.items.length}`;
   $("#viewer-prev").disabled = viewer.index === 0;
