@@ -25,6 +25,12 @@ const SECTIONS = [
         choices: [["0", "Off"], ...[1, 2, 3, 4, 6, 8, 12, 24].map((n) => [String(n), n === 1 ? "Every hour" : `Every ${n} hours`])],
       },
       {
+        key: "run_at",
+        label: "Starting at",
+        help: "The automatic downloads start at this time (this machine's clock), then repeat from there: every 6 hours from 01:00 is 01:00, 07:00, 13:00 and 19:00. Empty: counted from when they last ran. A start missed by more than 3 hours (the server was off) waits for the next one.",
+        type: "time",
+      },
+      {
         key: "max_concurrent_downloads",
         label: "Downloads at once",
         help: "They all use your one Reddit account, so keep this small.",
@@ -178,6 +184,13 @@ function settingRow(field) {
     const choices = [...field.choices];
     if (!choices.some(([value]) => value === setting.value)) choices.push([setting.value, setting.value]); // e.g. "0.5" hours
     control = h("select", { id }, choices.map(([value, text]) => h("option", { value, selected: value === setting.value }, text)));
+  } else if (field.type === "time") {
+    control = h(
+      "span",
+      { class: "number-with-unit" },
+      h("input", { id, type: "time", value: setting.value }),
+      setting.value ? h("button", { type: "button", class: "link small", onclick: () => save(field, "") }, "clear") : null,
+    );
   } else if (field.type === "toggle") {
     control = h("label", { class: "switch" }, h("input", { id, type: "checkbox", checked: setting.value === "true", role: "switch" }), h("span", { "aria-hidden": "true" }));
   } else if (field.type === "number") {
@@ -210,6 +223,7 @@ function settingRow(field) {
 function describe(field, value) {
   if (field.type === "select") return field.choices.find(([v]) => v === value)?.[1] || value;
   if (field.type === "toggle") return value === "true" ? "on" : "off";
+  if (field.type === "time") return value || "not set";
   return field.unit ? `${value} ${field.unit}` : value || "empty";
 }
 

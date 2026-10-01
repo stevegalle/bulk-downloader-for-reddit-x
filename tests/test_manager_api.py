@@ -661,3 +661,60 @@ def test_rate_limited_download_goes_to_the_back_and_waits(tmp_path: Path, limite
     with pytest.raises(service.ManagerError):
         service.set_setting(conn, "rate_limit_backoff_minutes", "0")
     conn.close()
+
+
+@pytest.fixture
+def pacific_time(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_schedule_at_a_fixed_local_time(tmp_path: Path, pacific_time):  # noqa: ARG001
+    from datetime import datetime, timezone
+
+    from bdfrx.manager.jobs import schedule_due_at
+
+    _configure(tmp_path / "api.db", log_dir=str(tmp_path / "logs"), dest_root=str(tmp_path / "dest"))
+    conn = db.connect(tmp_path / "api.db")
+    service.set_setting(conn, "run_every_hours", "24")
+    service.set_setting(conn, "run_at", "01:00")
+
+    def local(text: str) -> datetime:  # "2026-09-30 20:25" Pacific -> UTC
+        return datetime.strptime(text, "%Y-%m-%d %H:%M").astimezone().astimezone(timezone.utc)
+
+    def last_ran(text: str) -> None:
+        service.set_state(conn, "last_scheduled_at", local(text).strftime("%Y-%m-%d %H:%M:%S"))
+
+    def due(now: str) -> datetime:
+        return schedule_due_at(conn, now=local(now))
+
+    # Turned on in the evening: the first run is 1 AM, not right away
+    assert due("2026-09-30 20:25") == local("2026-10-01 01:00")
+    last_ran("2026-10-01 01:00")
+    assert due("2026-10-01 05:00") == local("2026-10-02 01:00")
+    # Down at 1 AM, back at 2:30: catches up; back at 6 AM: waits for the next night
+    assert due("2026-10-02 02:30") == local("2026-10-02 01:00")
+    assert due("2026-10-02 06:00") == local("2026-10-03 01:00")
+    # Daylight saving ends on 1 November: still 1 AM local on either side
+    last_ran("2026-10-31 01:00")
+    assert due("2026-10-31 12:00") == local("2026-11-01 01:00")
+    last_ran("2026-11-01 01:00")
+    nov2 = due("2026-11-01 12:00")
+    assert nov2 == local("2026-11-02 01:00")
+    assert nov2.astimezone().hour == 1
+    # Every 6 hours from 01:00: 01, 07, 13, 19
+    service.set_setting(conn, "run_every_hours", "6")
+    last_ran("2026-10-05 07:00")
+    assert due("2026-10-05 08:00") == local("2026-10-05 13:00")
+    last_ran("2026-10-05 19:00")
+    assert due("2026-10-05 20:00") == local("2026-10-06 01:00")
+    # Without a time, it counts from the last run as before
+    service.set_setting(conn, "run_at", None)
+    assert due("2026-10-05 20:00") == local("2026-10-06 01:00")
+    for bad in ("1am", "24:00", "7:5"):
+        with pytest.raises(service.ManagerError):
+            service.set_setting(conn, "run_at", bad)
+    conn.close()

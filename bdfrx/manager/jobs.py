@@ -309,15 +309,48 @@ def schedule_tick(queue_: DownloadQueue, conn: sqlite3.Connection) -> Optional[d
     return counts
 
 
-def schedule_due_at(conn: sqlite3.Connection) -> Optional[datetime]:
-    """When the schedule next queues everything, or None when it is off"""
-    hours = float(service.get_settings(conn)["run_every_hours"])
+# A scheduled time missed by more than this (e.g. the server was down) waits for the next one instead of catching up
+SCHEDULE_GRACE = timedelta(hours=3)
+
+
+def schedule_due_at(conn: sqlite3.Connection, now: Optional[datetime] = None) -> Optional[datetime]:
+    """When the schedule next queues everything (UTC), or None when it is off.
+
+    With run_at set (local "HH:MM"), it runs at that time and every run_every_hours after it, starting again from
+    run_at each day, in the machine's local time (so daylight saving doesn't shift it). Without run_at, it runs
+    run_every_hours after the last time.
+    """
+    settings = service.get_settings(conn)
+    hours = float(settings["run_every_hours"])
     if hours <= 0:
         return None
-    last = service.get_state(conn, "last_scheduled_at")
-    if last is None:
-        return datetime.now(timezone.utc)
-    return datetime.strptime(last, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) + timedelta(hours=hours)
+    now = now or datetime.now(timezone.utc)
+    last_text = service.get_state(conn, "last_scheduled_at")
+    last = datetime.strptime(last_text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) if last_text else None
+    if not settings["run_at"]:
+        return now if last is None else last + timedelta(hours=hours)
+    slots = _schedule_slots(settings["run_at"], hours, now)
+    # The first slot after the last scheduled run, or from now on if it never ran
+    due = next(slot for slot in slots if (slot > last if last else slot >= now))
+    if due < now - SCHEDULE_GRACE:
+        due = next(slot for slot in slots if slot >= now)
+    return due
+
+
+def _schedule_slots(run_at: str, hours: float, around: datetime) -> list[datetime]:
+    """Scheduled times (UTC) from the day before `around` to two days after: run_at local time each day, then every
+    `hours` until the day ends"""
+    anchor = datetime.strptime(run_at, "%H:%M").time()
+    local_day = around.astimezone().date()
+    slots = []
+    for offset in range(-1, 3):
+        day = local_day + timedelta(days=offset)
+        start = datetime.combine(day, anchor)  # naive local wall-clock time
+        step = 0
+        while (wall := start + timedelta(hours=hours * step)).date() == day:
+            slots.append(wall.astimezone().astimezone(timezone.utc))  # naive -> local, DST-aware -> UTC
+            step += 1
+    return sorted(slots)
 
 
 def start_server_background(

@@ -35,6 +35,7 @@ DEFAULT_SETTINGS = {
     "follow_download_time": "all",
     "max_concurrent_downloads": "2",
     "run_every_hours": "0",
+    "run_at": "",
     "log_retention_days": "2",
     "rate_limit_backoff_minutes": "30",
     "incremental_runs": "true",
@@ -60,6 +61,8 @@ SETTING_HELP = {
     "follow_download_time": f"Time filter for the download started when you follow a candidate: {', '.join(TIMES)}",
     "max_concurrent_downloads": "How many bdfrx downloads may run at once, across the server and the CLI (1-8)",
     "run_every_hours": "The server queues every active source this often (e.g. 6, or 0.5); 0 turns the schedule off",
+    "run_at": "Local time (HH:MM) the schedule runs at, then every run_every_hours from there; empty: counted from "
+    "when it last ran",
     "log_retention_days": "Days to keep each run's full log file; results and the last lines stay in the DB for good",
     "rate_limit_backoff_minutes": "A download stopped by a site's rate limit goes to the back of the queue, not to "
     "start again for this long",
@@ -204,6 +207,10 @@ _SETTING_CHECKS: dict[str, tuple[Callable[[str], bool], str]] = {
     "log_retention_days": (_whole_number(1), "must be a whole number of days, at least 1"),
     "max_concurrent_downloads": (_whole_number(1, 8), "must be a whole number from 1 to 8"),
     "run_every_hours": (_schedule_hours, "must be 0 (off) or at least 0.25"),
+    "run_at": (
+        lambda v: v == "" or bool(re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v)),
+        "must be a time like 01:00 (24-hour), or empty",
+    ),
     "ignored_folder": (
         lambda v: bool(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", v)) and v not in ("users", "subreddits"),
         "must be a plain folder name other than users or subreddits",

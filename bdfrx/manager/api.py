@@ -148,6 +148,7 @@ def create_app(  # noqa: PLR0915
             "downloads": downloads.snapshot(),
             "schedule": {
                 "every_hours": float(service.get_settings(conn)["run_every_hours"]),
+                "run_at": service.get_settings(conn)["run_at"],
                 "last_at": service.get_state(conn, "last_scheduled_at"),
                 "next_at": due_at.strftime("%Y-%m-%d %H:%M:%S") if due_at else None,
             },

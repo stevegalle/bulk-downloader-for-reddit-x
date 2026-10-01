@@ -215,7 +215,9 @@ posts). A source's first run, and any all-time download (following someone, "Dow
 explicit window ("last week") reads back that far. `incremental_runs false` turns this off.
 
 With `run_every_hours` set (e.g. `6`; `0` is off), the server queues every active source that often, least recently
-run first. The time it last did so is kept in the database, so restarting the server doesn't reset it.
+run first. With `run_at` set (local time, e.g. `01:00`) it runs at that time and every `run_every_hours` from there,
+restarting from `run_at` each day, in the machine's local time zone; a time missed by more than 3 hours (the server was
+off) waits for the next one rather than catching up. The time it last did so is kept in the database, so restarting the server doesn't reset it.
 
 ## Web UI
 

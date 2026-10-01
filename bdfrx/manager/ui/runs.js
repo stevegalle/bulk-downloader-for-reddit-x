@@ -200,7 +200,7 @@ async function loadSchedule() {
     replaceWith(
       $("#activity-schedule"),
       schedule.every_hours
-        ? `Everything is queued every ${schedule.every_hours} h · next ${schedule.next_at ? `at ${next}` : next} · `
+        ? `Everything is queued every ${schedule.every_hours} h${schedule.run_at ? ` from ${schedule.run_at}` : ""} · next ${schedule.next_at ? `at ${next}` : next} · `
         : "The schedule is off · ",
       h("a", { href: "#settings/run_every_hours" }, schedule.every_hours ? "change" : "turn it on in Settings"),
     );
