@@ -166,7 +166,11 @@ def attention(conn: sqlite3.Connection) -> dict:
             "rate_limited": bool(re.search(r"Stopped: rate limited by", row["output_tail"] or "")),
         }
         for row in conn.execute(
-            "SELECT * FROM runs WHERE status = 'failed' AND started_at >= ? ORDER BY id DESC LIMIT 20;",
+            # Leave out failures a later run of the same source has already made up for
+            "SELECT * FROM runs f WHERE f.status = 'failed' AND f.started_at >= ? AND NOT EXISTS ("
+            "    SELECT 1 FROM runs later WHERE later.source_kind = f.source_kind"
+            "    AND later.source_name = f.source_name COLLATE NOCASE AND later.id > f.id AND later.status = 'ok'"
+            ") ORDER BY f.id DESC LIMIT 20;",
             (since,),
         )
     ]

@@ -1245,3 +1245,14 @@ def test_feed_sources_and_groups(conn: sqlite3.Connection):
     assert {p["author"] for p in groups["groups"][1]["items"]} == {"alice"}
     second_page = insights.feed_groups(conn, days=7, limit=1, offset=1)
     assert [g["name"] for g in second_page["groups"]] == ["alice"]
+
+
+def test_attention_leaves_out_failures_made_up_for(conn: sqlite3.Connection):
+    for name, statuses in (("fixed", ["failed", "ok"]), ("still_broken", ["ok", "failed"])):
+        for status in statuses:
+            conn.execute(
+                "INSERT INTO runs (source_kind, source_name, started_at, status) VALUES ('user', ?, datetime('now'), ?);",
+                (name, status),
+            )
+    conn.commit()
+    assert [r["source_name"] for r in insights.attention(conn)["failed_runs"]] == ["still_broken"]
