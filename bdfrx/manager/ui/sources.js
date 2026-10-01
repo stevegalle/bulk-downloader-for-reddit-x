@@ -635,17 +635,20 @@ function subredditRow(sub) {
   return row;
 }
 
+// Following a subreddit downloads it straight away, like following a person
 export async function followSubreddit(sub, done) {
+  let result;
   try {
-    await api("/sources", { method: "POST", body: { kind: "subreddit", name: sub.name } });
+    result = await api("/sources", { method: "POST", body: { kind: "subreddit", name: sub.name, download: true } });
   } catch (e) {
     toast(`Could not follow r/${sub.name}: ${e.message}`, { error: true });
     return;
   }
   sub.status = "active";
   done();
+  if (result.download) refreshDownloads();
   if (!$("#view-sources").hidden) loadSources();
-  toast(`Following r/${sub.name}`, {
+  toast(result.download ? `Following r/${sub.name} · downloading its posts` : `Following r/${sub.name}`, {
     undo: async () => {
       await api(`/sources/subreddit/${encodeURIComponent(sub.name)}`, { method: "DELETE" });
       sub.status = null;

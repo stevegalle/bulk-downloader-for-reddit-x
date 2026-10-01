@@ -330,6 +330,10 @@ def test_add_source_with_download(client: TestClient, fake_bdfrx: Path, tmp_path
     assert (last["trigger"], last["status"]) == ("added", "ok")
     assert "--time all" in client.get(f"/runs/{last['run_id']}").json()["command"]
     assert client.post("/sources", json={"kind": "user", "name": "bob"}).json()["download"] is None
+    added = client.post("/sources", json={"kind": "subreddit", "name": "pics", "download": True}).json()
+    assert added["download"] == "queued"
+    last = _wait_for_downloads(client)["last"]
+    assert (last["kind"], last["name"], last["trigger"], last["status"]) == ("subreddit", "pics", "added", "ok")
 
 
 def test_source_stats(client: TestClient, fake_bdfrx: Path, tmp_path: Path):  # noqa: F811
