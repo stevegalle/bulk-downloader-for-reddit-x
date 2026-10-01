@@ -206,8 +206,8 @@ export async function confirmIgnore(name) {
   return { setAside };
 }
 
-export async function ignoreUser(name, { setAside }) {
-  await api("/rules", { method: "POST", body: { kind: "ignore_user", value: name } });
+export async function ignoreUser(name, { setAside, reason }) {
+  await api("/rules", { method: "POST", body: { kind: "ignore_user", value: name, reason: reason || null } });
   if (!setAside) return { moved: 0, skipped: [] };
   return api(`/set-aside/${encodeURIComponent(name)}`, { method: "POST" });
 }

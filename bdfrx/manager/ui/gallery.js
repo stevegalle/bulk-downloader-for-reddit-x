@@ -1,5 +1,6 @@
 // A source's gallery (#gallery/u/name, #gallery/r/name): everything in its archive folder as a grid of thumbnails,
-// newest post first, with gallery posts grouped. Tapping one opens the full-screen viewer.
+// newest post first, with gallery posts grouped. #gallery/ignored/name shows someone's set-aside files the same way.
+// Tapping one opens the full-screen viewer.
 
 import { $, api, h, number, redditLink, sourceLabel, storage } from "./lib.js";
 import { openViewer, viewerItems } from "./viewer.js";
@@ -12,12 +13,12 @@ const page = { started: false, source: null, offset: 0, total: 0, done: false, l
 export function showGallery(path = []) {
   if (!page.started) setUp();
   const [prefix, name] = path;
-  if (!name || (prefix !== "u" && prefix !== "r")) {
+  if (!name || !["u", "r", "ignored"].includes(prefix)) {
     location.hash = "#sources";
     return;
   }
-  page.source = { kind: prefix === "u" ? "user" : "subreddit", name };
-  document.title = `${sourceLabel(page.source.kind, name)} · gallery · bdfrx manager`;
+  page.source = { kind: prefix === "r" ? "subreddit" : "user", name, setAside: prefix === "ignored" };
+  document.title = `${sourceLabel(page.source.kind, name)} · ${page.source.setAside ? "set aside" : "gallery"} · bdfrx manager`;
   reset();
 }
 
@@ -55,12 +56,17 @@ function reset() {
   page.loading = false;
   page.posts = [];
   $("#gallery-grid").replaceChildren();
-  const { kind, name } = page.source;
+  const { kind, name, setAside } = page.source;
   $("#gallery-title").replaceChildren(
     h("a", { href: redditLink(kind, name), target: "_blank", rel: "noopener noreferrer" }, sourceLabel(kind, name)),
+    setAside ? h("span", { class: "muted" }, " · set aside") : null,
   );
   $("#gallery-count").textContent = "";
+  $("#gallery-latest").hidden = setAside;
   $("#gallery-latest").setAttribute("href", `#latest/${kind === "user" ? "u" : "r"}/${encodeURIComponent(name)}`);
+  const back = $("#view-gallery .back-link");
+  back.setAttribute("href", setAside ? "#rules" : "#sources");
+  back.textContent = setAside ? "← Rules" : "← Sources";
   loadMore();
 }
 
@@ -72,7 +78,8 @@ async function loadMore() {
   const params = new URLSearchParams({ offset: page.offset, limit: PAGE_SIZE, ...filters() });
   $("#gallery-status").textContent = "Loading…";
   try {
-    const result = await api(`/sources/${kind}/${encodeURIComponent(name)}/gallery?${params}`);
+    const base = page.source.setAside ? `/set-aside/${encodeURIComponent(name)}` : `/sources/${kind}/${encodeURIComponent(name)}`;
+    const result = await api(`${base}/gallery?${params}`);
     if (generation !== page.generation) return;
     page.offset += result.posts.length;
     page.total = result.total_posts;
@@ -80,7 +87,8 @@ async function loadMore() {
     page.posts.push(...result.posts);
     $("#gallery-grid").append(...result.posts.map(tile));
     $("#gallery-count").textContent = `${number(result.total_posts)} post${result.total_posts === 1 ? "" : "s"} · ${number(result.total_files)} file${result.total_files === 1 ? "" : "s"}`;
-    $("#gallery-status").textContent = page.done && !page.total ? "Nothing in this source's folder yet." : "";
+    $("#gallery-status").textContent =
+      page.done && !page.total ? (page.source.setAside ? "No files set aside." : "Nothing in this source's folder yet.") : "";
   } catch (e) {
     if (generation === page.generation) $("#gallery-status").textContent = `Could not load: ${e.message}`;
   } finally {

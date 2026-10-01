@@ -214,6 +214,22 @@
       <p id="gallery-status" class="status"></p>
     </section>
 
+    <section id="view-rules" class="view" hidden>
+      <form class="filters" id="rules-ignore-form">
+        <label class="grow">Ignore someone
+          <input name="name" placeholder="Username, e.g. u/example" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="grow">Why (optional)
+          <input name="reason" autocomplete="off">
+        </label>
+        <div class="toolbar-actions"><button type="submit" class="danger">Ignore…</button></div>
+      </form>
+      <label class="rules-search">Find
+        <input id="rules-search" type="search" placeholder="Filter every list below" autocomplete="off" spellcheck="false">
+      </label>
+      <div id="rules-body"><p class="muted">Loading…</p></div>
+    </section>
+
     <section id="view-settings" class="view" hidden>
       <div id="settings-body"><p class="muted">Loading…</p></div>
     </section>

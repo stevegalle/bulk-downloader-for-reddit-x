@@ -20,7 +20,7 @@ _lock = threading.Lock()
 _cache: dict[str, tuple[float, list[dict]]] = {}
 
 
-def _post_order(post_id: Optional[str]) -> int:
+def post_order(post_id: Optional[str]) -> int:
     try:
         return int(post_id, 36) if post_id else -1
     except ValueError:
@@ -67,7 +67,7 @@ def source_posts(folder: Path, kind: str, name: str) -> list[dict]:
             },
         )
         post["files"].append(file_name)
-    ordered = sorted(posts.values(), key=lambda p: (_post_order(p["post_id"]), p["files"][0]), reverse=True)
+    ordered = sorted(posts.values(), key=lambda p: (post_order(p["post_id"]), p["files"][0]), reverse=True)
     with _lock:
         _cache[key] = (now, ordered)
     return ordered
@@ -98,7 +98,7 @@ def gallery_page(
     wanted = MEDIA_FILTERS[media]
     posts = source_posts(folder, kind, name)
     if wanted:
-        posts = [p for p in posts if candidates.file_kind(p["files"][0]) in wanted]
+        posts = [p for p in posts if any(candidates.file_kind(f) in wanted for f in p["files"])]
     if order == "oldest":
         posts = list(reversed(posts))
     page = [

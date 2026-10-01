@@ -156,7 +156,8 @@ files you deleted during review are noted and no longer tracked. Previews keep w
 
 It moves the files the manager knows about: every post recorded by runs or `scan-archive`, plus the whole
 `users/<user>/` folder if they were followed. In the web UI, **Ignore** offers the same move as a checkbox, and its
-**Undo** restores the files too.
+**Undo** restores the files too. Changed your mind later? The **Rules** page lists everyone ignored, with a gallery of
+their set-aside files to review, and **Unignore & restore files** undoes both at once (until you delete the files).
 
 ## Running
 
@@ -241,7 +242,10 @@ off) waits for the next one rather than catching up. The time it last did so is 
   last day or week with new files per day for 30 days; what needs attention (sources failing repeatedly, failed or
   interrupted runs, files that couldn't be fetched, deactivations); and the run history with filters, logs (errors
   and warnings highlighted) and Run again
-
+- **Rules**: everything that stops downloads, each with its reason and an Undo. Ignored people show whether they're
+  still a (paused) source and how many files are set aside, with a gallery to review them (`#gallery/ignored/name`);
+  unignore them with or without restoring the files. Add or remove skipped subreddits, skipped websites and excluded
+  posts (a Reddit link works), undismiss candidates, and search across every list
 - **Settings**: every setting in plain language, saved as soon as it's changed, with its default and a reset link.
   Settings naming programs, folders or file naming are shown but locked (change them on the server with
   `bdfrx-manager config set`); `#settings/<name>` jumps to one
@@ -328,4 +332,6 @@ journalctl --user -u bdfrx-manager-api -f
 | GET    | `/set-aside/{name}`          | How many of their files would move                   |
 | POST   | `/set-aside/{name}`          | Move their files into the ignored folder             |
 | DELETE | `/set-aside/{name}`          | Restore their set-aside files                        |
+| GET    | `/set-aside/{name}/gallery`  | Their set-aside files as posts, like a source's gallery |
+| GET    | `/set-aside/{name}/files/{id}` | One set-aside file (`/thumbnail` for a preview)    |
 | GET    | `/posts/{id}/files/{n}`      | A recorded file of a post (supports `Range`, so video can seek) |

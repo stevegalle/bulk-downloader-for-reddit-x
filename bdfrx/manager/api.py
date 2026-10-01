@@ -237,7 +237,7 @@ def create_app(  # noqa: PLR0915
         return source, runner.destination(service.get_settings(conn), source)
 
     @app.get("/sources/{kind}/{name}/gallery")
-    def source_gallery(  # noqa: PLR0913
+    def source_gallery(
         kind: SourceKind,
         name: str,
         conn: Conn,
@@ -390,6 +390,39 @@ def create_app(  # noqa: PLR0915
         """How many of the user's files are in the archive and would be moved"""
         summary = setaside.set_aside(conn, name, dry_run=True)
         return {"files": summary["moved"], "skipped": summary["skipped"]}
+
+    @app.get("/set-aside/{name}/gallery")
+    def set_aside_gallery(
+        name: str,
+        conn: Conn,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(60, ge=1, le=500),
+        order: Literal["newest", "oldest"] = "newest",
+        media: Literal["all", "images", "videos"] = "all",
+    ) -> dict:
+        """The user's set-aside files, as a gallery (same shape as a source's)"""
+        page = setaside.gallery_page(conn, name, offset, limit, order, media)
+        for post in page["posts"]:
+            for file in post["files"]:
+                file["url"] = f"/set-aside/{urllib.parse.quote(name)}/files/{file['id']}"
+        return page
+
+    @app.get("/set-aside/{name}/files/{record_id}", response_class=FileResponse)
+    def set_aside_file(name: str, record_id: int, conn: Conn) -> FileResponse:
+        return FileResponse(
+            setaside.set_aside_file(conn, name, record_id), headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    @app.get("/set-aside/{name}/files/{record_id}/thumbnail", response_class=FileResponse)
+    async def set_aside_file_thumbnail(name: str, record_id: int, conn: Conn) -> FileResponse:
+        path = setaside.set_aside_file(conn, name, record_id)
+        try:
+            found = await in_thumbnail_thread(
+                thumbs.thumbnail, path, runner.log_dir(service.get_settings(conn)) / "thumbs",
+            )
+        except thumbs.ThumbnailError as e:
+            raise HTTPException(404, str(e))
+        return FileResponse(found, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
 
     @app.post("/set-aside/{name}")
     def do_set_aside(name: str, conn: Conn) -> dict:

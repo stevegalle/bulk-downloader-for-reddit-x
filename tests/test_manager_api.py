@@ -761,3 +761,40 @@ def test_source_gallery(client: TestClient, tmp_path: Path):
         assert client.get(f"/sources/user/alice/files/{bad}").status_code == 404, bad
     assert gallery.file_in_folder(folder, "../../secret.txt") is None
     assert client.get("/sources/user/nobody/gallery").status_code == 404
+
+
+def test_set_aside_gallery(client: TestClient, tmp_path: Path):
+    from bdfrx.manager import candidates
+
+    root = tmp_path / "dest"
+    for relative in (
+        "subreddits/pics/alice_pics_1aaaaa_10.jpg",
+        "subreddits/pics/alice_pics_1zzzzz_10_1.jpg",
+        "subreddits/pics/alice_pics_1zzzzz_10_2.mp4",
+        "subreddits/pics/bob_pics_1bbbbb_1.jpg",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(relative)
+    conn = db.connect(tmp_path / "api.db")
+    candidates.scan_archive(conn, root)
+    conn.close()
+    client.post("/rules", json={"kind": "ignore_user", "value": "alice"})
+    client.post("/set-aside/alice")
+    client.post("/set-aside/bob")
+
+    page = client.get("/set-aside/alice/gallery").json()
+    assert (page["total_posts"], page["total_files"]) == (2, 3)
+    newest = page["posts"][0]
+    assert (newest["post_id"], newest["subreddit"]) == ("1zzzzz", "pics")
+    assert [f["kind"] for f in newest["files"]] == ["image", "video"]
+    url = newest["files"][0]["url"]
+    assert client.get(url).text == "subreddits/pics/alice_pics_1zzzzz_10_1.jpg"
+    assert client.get("/set-aside/alice/gallery", params={"media": "videos"}).json()["total_posts"] == 1
+
+    bob_id = client.get("/set-aside/bob/gallery").json()["posts"][0]["files"][0]["id"]
+    assert client.get(f"/set-aside/alice/files/{bob_id}").status_code == 404  # not alice's
+    assert client.get("/set-aside/alice/files/99999").status_code == 404
+    client.delete("/set-aside/alice")
+    assert client.get(url).status_code == 404  # restored, so no longer served from here
+    assert client.get("/set-aside/alice/gallery").json()["total_posts"] == 0

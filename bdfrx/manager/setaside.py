@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, TypedDict
 
-from bdfrx.manager import runner, service
+from bdfrx.manager import candidates, gallery, runner, service
 
 ARCHIVE_KINDS = ("subreddits", "users")
 
@@ -181,3 +181,62 @@ def list_set_aside(conn: sqlite3.Connection) -> list[dict]:
             "GROUP BY author COLLATE NOCASE ORDER BY author COLLATE NOCASE;",
         )
     ]
+
+
+def _set_aside_rows(conn: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM set_aside WHERE author = ? AND restored_at IS NULL AND gone_at IS NULL ORDER BY id;",
+        (service.normalize_name("user", name),),
+    ).fetchall()
+
+
+def gallery_page(
+    conn: sqlite3.Connection,
+    name: str,
+    offset: int = 0,
+    limit: int = 60,
+    order: str = "newest",
+    media: str = "all",
+) -> dict:
+    """The author's set-aside files as gallery posts (same shape as a source's gallery), newest post first. Each file
+    carries its set-aside record id, which is how it is fetched: only recorded files are ever served."""
+    posts: dict[str, dict] = {}
+    for row in _set_aside_rows(conn, name):
+        path = Path(row["to_path"])
+        # .../ignored/<author>/subreddits/<subreddit>/<file> or .../ignored/<author>/users/<author>/<file>
+        subreddit = path.parent.name if path.parent.parent.name == "subreddits" else None
+        key = row["post_id"] or f"file:{row['id']}"
+        post = posts.setdefault(
+            key,
+            {"post_id": row["post_id"], "author": row["author"], "subreddit": subreddit, "score": None, "files": []},
+        )
+        post["files"].append({"id": row["id"], "name": path.name, "kind": candidates.file_kind(path.name)})
+    wanted = gallery.MEDIA_FILTERS[media]
+    ordered = sorted(
+        posts.values(), key=lambda p: (gallery.post_order(p["post_id"]), p["files"][0]["name"]), reverse=True,
+    )
+    if wanted:
+        ordered = [p for p in ordered if any(f["kind"] in wanted for f in p["files"])]
+    if order == "oldest":
+        ordered.reverse()
+    page = [
+        {
+            **post,
+            "files": [
+                {**file, "index": index} for index, file in enumerate(sorted(post["files"], key=lambda f: f["name"]))
+            ],
+        }
+        for post in ordered[offset : offset + limit]
+    ]
+    return {"total_posts": len(ordered), "total_files": sum(len(p["files"]) for p in ordered), "posts": page}
+
+
+def set_aside_file(conn: sqlite3.Connection, name: str, record_id: int) -> Path:
+    """The path of one of the author's set-aside files, by its record id"""
+    row = conn.execute(
+        "SELECT to_path FROM set_aside WHERE id = ? AND author = ? AND restored_at IS NULL AND gone_at IS NULL;",
+        (record_id, service.normalize_name("user", name)),
+    ).fetchone()
+    if row is None or not Path(row[0]).is_file():
+        raise service.NotFoundError(f"No set-aside file {record_id} for {name}")
+    return Path(row[0])

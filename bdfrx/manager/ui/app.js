@@ -20,6 +20,7 @@ import {
 } from "./lib.js";
 import { showGallery } from "./gallery.js";
 import { showLatest } from "./latest.js";
+import { showRules } from "./rules.js";
 import { showRuns } from "./runs.js";
 import { showSettings } from "./settings.js";
 import { showSources } from "./sources.js";
@@ -37,16 +38,19 @@ const VIEWS = {
   latest: { title: "Latest", show: (path) => showLatest(true, path), hide: () => showLatest(false) },
   runs: { title: "Runs", show: () => showRuns(true), hide: () => showRuns(false) },
   settings: { title: "Settings", show: (path) => showSettings(path) },
-  gallery: { title: "Gallery", show: (path) => showGallery(path), tab: "sources" },
+  gallery: { title: "Gallery", show: (path) => showGallery(path), tab: (path) => (path[0] === "ignored" ? "rules" : "sources") },
+  rules: { title: "Rules", show: () => showRules() },
 };
-const TAB_TITLES = { rules: "Rules" };
+const TAB_TITLES = {};
 let currentTab = null;
 
 function route() {
   // "#latest/u/name" is the latest tab showing one source; the part after the tab name goes to the page
   const [first, ...path] = decodeURIComponent(location.hash.slice(1)).split("/");
   const tab = first || "candidates";
-  const navTab = VIEWS[tab]?.tab || tab; // pages without a tab of their own light up their parent's
+  // Pages without a tab of their own light up their parent's
+  const parent = VIEWS[tab]?.tab;
+  const navTab = (typeof parent === "function" ? parent(path) : parent) || tab;
   for (const link of document.querySelectorAll("[data-tab]")) {
     if (link.dataset.tab === navTab) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
