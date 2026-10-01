@@ -20,6 +20,7 @@ import {
 } from "./lib.js";
 import { showLatest } from "./latest.js";
 import { showRuns } from "./runs.js";
+import { showSettings } from "./settings.js";
 import { showSources } from "./sources.js";
 import { openViewer, setUpViewer, viewerItems } from "./viewer.js";
 
@@ -34,8 +35,9 @@ const VIEWS = {
   sources: { title: "Sources", show: () => showSources(true), hide: () => showSources(false) },
   latest: { title: "Latest", show: (path) => showLatest(true, path), hide: () => showLatest(false) },
   runs: { title: "Runs", show: () => showRuns(true), hide: () => showRuns(false) },
+  settings: { title: "Settings", show: (path) => showSettings(path) },
 };
-const TAB_TITLES = { rules: "Rules", settings: "Settings" };
+const TAB_TITLES = { rules: "Rules" };
 let currentTab = null;
 
 function route() {

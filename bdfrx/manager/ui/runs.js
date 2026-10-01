@@ -197,9 +197,13 @@ async function loadSchedule() {
     const next = schedule.next_at
       ? new Date(`${schedule.next_at.replace(" ", "T")}Z`).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })
       : "soon";
-    $("#activity-schedule").textContent = schedule.every_hours
-      ? `Everything is queued every ${schedule.every_hours} h · next ${schedule.next_at ? `at ${next}` : next}`
-      : "Schedule off: set run_every_hours in Settings to download everything regularly";
+    replaceWith(
+      $("#activity-schedule"),
+      schedule.every_hours
+        ? `Everything is queued every ${schedule.every_hours} h · next ${schedule.next_at ? `at ${next}` : next} · `
+        : "The schedule is off · ",
+      h("a", { href: "#settings/run_every_hours" }, schedule.every_hours ? "change" : "turn it on in Settings"),
+    );
   } catch {
     $("#activity-schedule").textContent = "";
   }

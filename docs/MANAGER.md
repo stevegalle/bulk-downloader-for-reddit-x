@@ -229,6 +229,10 @@ run first. The time it last did so is kept in the database, so restarting the se
   interrupted runs, files that couldn't be fetched, deactivations); and the run history with filters, logs (errors
   and warnings highlighted) and Run again
 
+- **Settings**: every setting in plain language, saved as soon as it's changed, with its default and a reset link.
+  Settings naming programs, folders or file naming are shown but locked (change them on the server with
+  `bdfrx-manager config set`); `#settings/<name>` jumps to one
+
 Run log files are deleted after `log_retention_days` (default 2); each run's result, counts and last lines stay in the
 database. Runs record what started them (`trigger`), and how many files failed for good or will be retried.
 
@@ -246,8 +250,8 @@ Interactive docs are at `http://<host>:8765/docs` (and `/` redirects there).
 Set an API key when serving beyond localhost: with `--api-key` or `$BDFRX_MANAGER_API_KEY` set, every request must
 send it in an `X-API-Key` header (the docs page has an **Authorize** button for it), or in a `bdfrx_manager_key`
 cookie, which is how the UI authorizes `<img>` and `<video>` requests that can't carry headers. Settings that name commands or
-paths (`dest_root`, `staging_root`, `bdfrx_command`, `bdfrx_config`, `history_db_*`, `log_dir`) and per-source
-`extra_args` are read-only over the API whether or not a key is set; change them on the server with
+paths (`dest_root`, `staging_root`, `bdfrx_command`, `bdfrx_config`, `history_db_*`, `log_dir`, `ignored_folder`), file
+naming (`file_scheme`, `folder_scheme`), `authenticate`, and per-source `extra_args` are read-only over the API whether or not a key is set; change them on the server with
 `bdfrx-manager config set` / `bdfrx-manager set`.
 
 To keep it running as a systemd user service (with lingering enabled, it starts at boot):

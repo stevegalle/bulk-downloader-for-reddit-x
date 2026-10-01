@@ -81,6 +81,11 @@ LOCAL_ONLY_SETTINGS = (
     "history_db_subreddit",
     "log_dir",
     "ignored_folder",
+    # Not dangerous, but changing them over the network would quietly break things: file names are parsed for
+    # candidates, previews, set-aside and history splitting, and downloads need authentication
+    "file_scheme",
+    "folder_scheme",
+    "authenticate",
 )
 
 
