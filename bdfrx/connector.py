@@ -54,6 +54,48 @@ class RedditTypes:
         YEAR = "year"
 
 
+class PostFilters:
+    """--exclude-title, --include-title, --exclude-flair and --include-flair: case-insensitive regular expressions
+    searched for anywhere in a post's title or flair. A post is skipped if any exclude pattern matches, or if there are
+    include patterns and none matches. A post without flair has an empty one."""
+
+    FIELDS = ("title", "flair")
+
+    def __init__(self, exclude: dict[str, list], include: dict[str, list]) -> None:
+        self.exclude = {field: self._compile(field, "exclude", patterns) for field, patterns in exclude.items()}
+        self.include = {field: self._compile(field, "include", patterns) for field, patterns in include.items()}
+
+    @classmethod
+    def from_args(cls, args: Configuration) -> "PostFilters":
+        return cls(
+            {field: list(getattr(args, f"exclude_{field}") or []) for field in cls.FIELDS},
+            {field: list(getattr(args, f"include_{field}") or []) for field in cls.FIELDS},
+        )
+
+    @staticmethod
+    def _compile(field: str, kind: str, patterns: list) -> list[re.Pattern]:
+        compiled = []
+        for pattern in patterns:
+            try:
+                compiled.append(re.compile(pattern, re.IGNORECASE))
+            except re.error as e:  # noqa: PERF203 - only runs once, at startup
+                raise errors.BulkDownloaderException(
+                    f"--{kind}-{field} '{pattern}' is not a valid regular expression: {e}",
+                )
+        return compiled
+
+    def rejects(self, submission: praw.models.Submission) -> Optional[str]:
+        """Why the submission is filtered out, or None to keep it"""
+        values = {"title": submission.title or "", "flair": getattr(submission, "link_flair_text", None) or ""}
+        for field, value in values.items():
+            for pattern in self.exclude[field]:
+                if pattern.search(value):
+                    return f"{field} matches --exclude-{field} '{pattern.pattern}'"
+            if self.include[field] and not any(pattern.search(value) for pattern in self.include[field]):
+                return f"{field} matches no --include-{field}"
+        return None
+
+
 class RedditConnector(metaclass=ABCMeta):
     def __init__(self, args: Configuration, logging_handlers: Iterable[logging.Handler] = ()) -> None:
         self.args = args
@@ -108,6 +150,8 @@ class RedditConnector(metaclass=ABCMeta):
 
         self.args.skip_subreddit = self.split_args_input(self.args.skip_subreddit)
         self.args.skip_subreddit = {sub.lower() for sub in self.args.skip_subreddit}
+
+        self.post_filters = PostFilters.from_args(self.args)
 
     @staticmethod
     def _apply_logging_handlers(handlers: Iterable[logging.Handler]) -> None:

@@ -30,7 +30,6 @@ _common_options = [
     click.option("--folder-scheme", type=str, default=None),
     click.option("--ignore-user", type=str, multiple=True, default=None),
     click.option("--ignore-user-file", type=str, multiple=True, default=None),
-    click.option("--filter-gender", type=click.Choice(("male", "female")), default=None),
     click.option("--include-id-file", type=str, multiple=True, default=None),
     click.option("-L", "--limit", type=int, default=None),
     click.option("-l", "--link", type=str, multiple=True, default=None),
@@ -68,6 +67,10 @@ _downloader_options = [
     click.option("--skip", multiple=True, default=None),
     click.option("--skip-domain", multiple=True, default=None),
     click.option("--skip-subreddit", multiple=True, default=None),
+    click.option("--exclude-title", multiple=True, default=None),
+    click.option("--include-title", multiple=True, default=None),
+    click.option("--exclude-flair", multiple=True, default=None),
+    click.option("--include-flair", multiple=True, default=None),
 ]
 
 

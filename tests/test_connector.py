@@ -3,6 +3,7 @@ import threading
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock
 
 import praw
@@ -619,3 +620,32 @@ def test_check_subreddit_status_bad(test_subreddit_name: str, expected_message: 
 def test_check_subreddit_status_good(test_subreddit_name: str, reddit_instance: praw.Reddit):
     test_subreddit = reddit_instance.subreddit(test_subreddit_name)
     RedditConnector.check_subreddit_status(test_subreddit)
+
+
+def _post(title: str, flair: Optional[str] = None) -> MagicMock:
+    submission = MagicMock()
+    submission.title = title
+    submission.link_flair_text = flair
+    return submission
+
+
+def test_post_filters_exclude_and_include():
+    from bdfrx.connector import PostFilters
+
+    filters = PostFilters({"title": [r"\[M4"], "flair": ["^meta$"]}, {"title": [], "flair": []})
+    assert filters.rejects(_post("[F4M] hello")) is None
+    assert filters.rejects(_post("[m4f] hello")) == r"title matches --exclude-title '\[M4'"
+    assert filters.rejects(_post("hello", "Meta")) == "flair matches --exclude-flair '^meta$'"
+    assert filters.rejects(_post("hello", "metadata")) is None
+
+    only_oc = PostFilters({"title": [r"\[M4"], "flair": []}, {"title": [], "flair": ["OC", "original"]})
+    assert only_oc.rejects(_post("hi", "Original content")) is None
+    assert only_oc.rejects(_post("hi")) == "flair matches no --include-flair"
+    assert only_oc.rejects(_post("[M4F] hi", "OC")).startswith("title matches --exclude-title")  # exclusions win
+
+
+def test_post_filters_bad_pattern():
+    from bdfrx.connector import PostFilters
+
+    with pytest.raises(BulkDownloaderException, match="--exclude-title"):
+        PostFilters({"title": ["[unclosed"], "flair": []}, {"title": [], "flair": []})

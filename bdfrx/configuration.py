@@ -22,13 +22,16 @@ class Configuration(Namespace):
         self.downvoted: bool = False
         self.exclude_id = []
         self.exclude_id_file = []
+        self.exclude_flair: list[str] = []
+        self.exclude_title: list[str] = []
         self.file_scheme: str = "{REDDITOR}_{TITLE}_{POSTID}"
         self.filename_restriction_scheme = None
-        self.filter_gender = None
         self.folder_scheme: str = "{SUBREDDIT}"
         self.ignore_user = []
         self.ignore_user_file = []
+        self.include_flair: list[str] = []
         self.include_id_file = []
+        self.include_title: list[str] = []
         self.limit: Optional[int] = None
         self.link: list[str] = []
         self.log: Optional[str] = None

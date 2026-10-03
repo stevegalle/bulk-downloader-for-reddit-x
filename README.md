@@ -159,6 +159,13 @@ In cases when the same option is specified both in the YAML file and in as a com
     - Sets the scheme for folders
     - Default is `{SUBREDDIT}`
     - See [Folder and File Name Schemes](#folder-and-file-name-schemes) for more details
+- `--exclude-flair`
+    - Skips submissions whose flair matches this regular expression, searched for anywhere in the flair, ignoring case
+    - Can be specified multiple times; a match with any of them skips the submission
+- `--exclude-title`
+    - Skips submissions whose title matches this regular expression, searched for anywhere in the title, ignoring case
+    - Can be specified multiple times; a match with any of them skips the submission
+    - e.g. `--exclude-title '\[M4'` skips titles tagged `[M4F]`, `[M4A]` and so on
 - `--ignore-user`
     - This will add a user to ignore
     - Can be specified multiple times
@@ -171,6 +178,14 @@ In cases when the same option is specified both in the YAML file and in as a com
     - This will add any submission with the IDs in the files provided
     - Can be specified multiple times
     - Format is one ID per line
+- `--include-flair`
+    - Only downloads submissions whose flair matches at least one of these regular expressions (a submission without
+      flair has an empty one)
+    - Can be specified multiple times
+- `--include-title`
+    - Only downloads submissions whose title matches at least one of these regular expressions, ignoring case
+    - Can be specified multiple times
+    - Exclusions win: a title matching both `--include-title` and `--exclude-title` is skipped
 - `-L, --limit`
     - This is the limit on the number of submissions retrieve
     - Default is max possible

@@ -9,7 +9,7 @@ import requests
 
 from bdfrx.__main__ import make_console_logging_handler
 from bdfrx.configuration import Configuration
-from bdfrx.connector import RedditConnector
+from bdfrx.connector import PostFilters, RedditConnector
 from bdfrx.downloader import RedditDownloader
 from bdfrx.exceptions import BulkDownloaderException, RateLimitedError, SiteDownloaderError, TemporaryDownloadError
 
@@ -32,6 +32,7 @@ def downloader_mock(args: Configuration):
     downloader_mock._sanitise_subreddit_name = RedditConnector.sanitise_subreddit_name
     downloader_mock._split_args_input = RedditConnector.split_args_input
     downloader_mock.master_hash_list = {}
+    downloader_mock.post_filters = PostFilters.from_args(args)
     return downloader_mock
 
 

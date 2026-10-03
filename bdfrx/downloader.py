@@ -10,7 +10,6 @@ from multiprocessing import Pool
 from pathlib import Path
 from time import sleep
 from typing import Union
-import re
 import praw
 import praw.exceptions
 import praw.models
@@ -122,14 +121,9 @@ class RedditDownloader(RedditConnector):
         ):
             logger.debug(f"Submission {submission.id} filtered due to score ratio ({submission.upvote_ratio})")
             return
-        if self.args.filter_gender == "male":
-            if re.search(r"\[M4.*?]", submission.title, re.IGNORECASE):
-                logger.info(f"Submission {submission.id} filtered due to title containing 'M4'")
-                return
-        if self.args.filter_gender == 'female':
-            if re.search(r"\[F4.*?]", submission.title, re.IGNORECASE):
-                logger.info(f"Submission {submission.id} filtered due to title containing 'M4'")
-                return
+        if reason := self.post_filters.rejects(submission):
+            logger.info(f"Submission {submission.id} filtered: {reason}")
+            return
 
         if not isinstance(submission, praw.models.Submission):
             logger.warning(f"{submission.id} is not a submission")
