@@ -81,7 +81,7 @@ class PostFilters:
             except re.error as e:  # noqa: PERF203 - only runs once, at startup
                 raise errors.BulkDownloaderException(
                     f"--{kind}-{field} '{pattern}' is not a valid regular expression: {e}",
-                )
+                ) from None
         return compiled
 
     def rejects(self, submission: praw.models.Submission) -> Optional[str]:
