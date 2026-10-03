@@ -58,6 +58,34 @@ def feed(
     return posts
 
 
+def with_statuses(conn: sqlite3.Connection, posts: list[dict]) -> list[dict]:
+    """Adds what the feed has to each post that names them: whether you follow (and how) or ignore its author, and
+    follow or skip its subreddit"""
+
+    def lookup(query: str, names: set) -> dict:
+        if not names:
+            return {}
+        marks = ", ".join("?" * len(names))
+        return {row[0].lower(): row[1] for row in conn.execute(query.format(marks=marks), [*names])}
+
+    authors = {p["author"] for p in posts if p.get("author")}
+    subreddits = {p["subreddit"] for p in posts if p.get("subreddit")}
+    status_query = "SELECT name, status FROM sources WHERE kind = '{kind}' AND name COLLATE NOCASE IN ({{marks}});"
+    rule_query = "SELECT value, 1 FROM rules WHERE kind = '{kind}' AND value COLLATE NOCASE IN ({{marks}});"
+    author_status = lookup(status_query.format(kind="user"), authors)
+    subreddit_status = lookup(status_query.format(kind="subreddit"), subreddits)
+    ignored = lookup(rule_query.format(kind="ignore_user"), authors)
+    skipped = lookup(rule_query.format(kind="skip_subreddit"), subreddits)
+    for post in posts:
+        author = (post.get("author") or "").lower()
+        subreddit = (post.get("subreddit") or "").lower()
+        post["author_status"] = author_status.get(author)
+        post["author_ignored"] = author in ignored
+        post["subreddit_status"] = subreddit_status.get(subreddit)
+        post["subreddit_skipped"] = subreddit in skipped
+    return posts
+
+
 def feed_sources(conn: sqlite3.Connection, days: int = 7, kind: Optional[str] = None) -> list[dict]:
     """Sources whose runs downloaded posts in the last `days` days, most recent first, with how many posts and the
     cursor of their newest one (for "unseen" markers)"""

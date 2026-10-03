@@ -383,6 +383,13 @@ dialog::backdrop { background: rgb(0 0 0 / 0.5); }
 }
 
 .viewer-bar a { color: #fff; }
+.viewer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-right: auto; }
+/* The bar is dark in both themes */
+.viewer-actions button { min-height: 32px; padding: 4px 12px; background: transparent; }
+.viewer-actions button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.viewer-actions button.danger { color: #ff8a8a; border-color: #7a3b3b; }
+.viewer-actions .pill { margin: 0; }
+.viewer .toasts { bottom: calc(64px + env(safe-area-inset-bottom)); } /* above the bar */
 .viewer-bar-right { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
 .viewer-bar button { color: #eee; border-color: #444; }
 
@@ -789,4 +796,6 @@ label.stacked { display: flex; flex-direction: column; gap: 4px; font-size: 0.8r
   .card-actions button { max-width: none; }
   .toasts { bottom: 84px; }
   .viewer-nav { display: none; }
+  .viewer-bar { flex-wrap: wrap; row-gap: 8px; }
+  .viewer-actions { order: 3; flex-basis: 100%; }
 }

@@ -767,6 +767,29 @@ def test_source_gallery(client: TestClient, tmp_path: Path):
     assert client.get("/sources/user/nobody/gallery").status_code == 404
 
 
+def test_gallery_statuses(client: TestClient, tmp_path: Path):
+    folder = tmp_path / "dest" / "subreddits" / "pics"
+    folder.mkdir(parents=True)
+    for name in ("Alice_pics_aaa111_10.jpg", "bob_pics_bbb111_1.jpg", "carol_pics_ccc111_2.jpg", "dave_pics_ddd111.jpg"):
+        (folder / name).write_text("x")
+    client.post("/sources", json={"kind": "subreddit", "name": "pics"})
+    client.post("/sources", json={"kind": "user", "name": "alice"})
+    client.post("/sources", json={"kind": "user", "name": "bob", "status": "paused"})
+    client.post("/rules", json={"kind": "ignore_user", "value": "carol"})
+    client.post("/rules", json={"kind": "skip_subreddit", "value": "cats"})
+
+    posts = {p["author"]: p for p in client.get("/sources/subreddit/pics/gallery").json()["posts"]}
+    statuses = {a: (p["author_status"], p["author_ignored"]) for a, p in posts.items()}
+    assert statuses == {"Alice": ("active", False), "bob": ("paused", False), "carol": (None, True), "dave": (None, False)}
+    assert (posts["dave"]["subreddit_status"], posts["dave"]["subreddit_skipped"]) == ("active", False)
+
+    user_folder = tmp_path / "dest" / "users" / "alice"
+    user_folder.mkdir(parents=True)
+    (user_folder / "alice_cats_eee111_1.jpg").write_text("x")
+    post = client.get("/sources/user/alice/gallery").json()["posts"][0]
+    assert (post["subreddit"], post["subreddit_status"], post["subreddit_skipped"]) == ("cats", None, True)
+
+
 def test_set_aside_gallery(client: TestClient, tmp_path: Path):
     from bdfrx.manager import candidates
 

@@ -46,8 +46,10 @@ lists what it's called in the code (`#hash` address, element id, file), for find
 - **Toast** (`#toasts`): the message after an action, usually with **Undo**
 - **Ignore dialog** (`#ignore-dialog`): "Ignore u/name?" with the **set-aside checkbox**
 - **Confirm dialog** (`#confirm-dialog`): yes/no questions such as Remove
-- **Viewer** (`#viewer`, viewer.js): **stage**, **‹ ›** arrows, **info line** (subreddit link, score, date), **counter**
-  ("3 / 40"), Close
+- **Viewer** (`#viewer`, viewer.js): **stage**, **‹ ›** arrows, and the **viewer bar** at the bottom. It holds the
+  **info line** (subreddit link, score, date), the **viewer actions** (`#viewer-actions`: filled in by the Gallery,
+  see there), the **counter** ("3 / 40") and Close. On phones the viewer actions get a row of their own. Toasts show
+  above the bar while it's open
 - **Log viewer** (`#log-dialog`, logs.js): a run's log, live while running, with **Next problem**
 
 ## Candidates `#candidates` (app.js)
@@ -104,6 +106,10 @@ Not a tab. Opened from a **card thumbnail**, **Gallery →** on Latest, or Edit.
 - **Gallery header**: **← Sources**, name, "N posts · N files", **Latest downloads →**
 - **Filter bar** (`#gallery-filters`): Show (Everything / Images / Videos), Order (Newest / Oldest first)
 - **Gallery grid** of **gallery tiles**; ▶ marks videos, `1/N` marks gallery posts
+- **Viewer actions**, for the post on screen:
+  - in a subreddit's gallery: who posted it (**u/author**), a **status pill** (following / following, paused /
+    ignored), and **Follow** (or **Resume**) / **Unfollow** / **Ignore**
+  - in a person's gallery: the subreddit's **status pill** (following / skipped), or **Follow r/sub** / **Skip**
 - **Set-aside gallery** `#gallery/ignored/name`: the same page for an ignored person's set-aside files. It has
   **← Rules**, and "· set aside" after the name
 

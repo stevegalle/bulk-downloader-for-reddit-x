@@ -109,6 +109,15 @@ export async function api(path, { method = "GET", body, retry = true } = {}) {
 
 // Toasts, optionally with an undo button
 
+// An open modal dialog covers the rest of the page, so toasts (and their Undo) go inside the topmost one while it's
+// open, and back out when it closes
+function placeToasts() {
+  const box = $("#toasts");
+  const host = [...document.querySelectorAll("dialog[open]")].filter((d) => d.matches(":modal")).pop() || document.body;
+  if (box.parentElement !== host) host.append(box);
+}
+document.addEventListener("close", () => setTimeout(placeToasts), true); // close doesn't bubble, so capture it
+
 export function toast(message, { error = false, undo } = {}) {
   const el = h("div", { class: error ? "toast error" : "toast", role: error ? "alert" : "status" }, h("span", {}, message));
   let timer;
@@ -128,6 +137,7 @@ export function toast(message, { error = false, undo } = {}) {
       } }, "Undo"),
     );
   }
+  placeToasts();
   $("#toasts").append(el);
   timer = setTimeout(close, undo ? 7000 : error ? 8000 : 3500);
 }

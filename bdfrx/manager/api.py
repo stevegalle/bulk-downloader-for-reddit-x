@@ -246,9 +246,11 @@ def create_app(  # noqa: PLR0915
         order: Literal["newest", "oldest"] = "newest",
         media: Literal["all", "images", "videos"] = "all",
     ) -> dict:
-        """Posts in the source's archive folder, newest first (by post ID), each file with a url"""
+        """Posts in the source's archive folder, newest first (by post ID), each file with a url, and whether you
+        follow or ignore its author and follow or skip its subreddit"""
         source, folder = source_folder(conn, kind, name)
         page = gallery.gallery_page(folder, kind, source["name"], offset, limit, order, media)
+        insights.with_statuses(conn, page["posts"])
         base = f"/sources/{kind}/{urllib.parse.quote(source['name'])}/files"
         for post in page["posts"]:
             for file in post["files"]:

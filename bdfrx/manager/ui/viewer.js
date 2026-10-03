@@ -1,14 +1,17 @@
-// The full-screen viewer for a set of posts' files: images, videos, audio and text, with swipe and arrow keys.
+// The full-screen viewer for a set of posts' files: images, videos, audio and text, with swipe and arrow keys. Whoever
+// opens it can add actions for the current post to its bar (the gallery's Follow and Ignore).
 
 import { $, h, number, timeAgo } from "./lib.js";
 
 // Full-screen viewer
 
-const viewer = { items: [], index: 0 };
+const viewer = { items: [], index: 0, actions: null };
 
-export function openViewer(items, index) {
+// actions(post): the nodes to show in the bar for that post, or null; refreshViewer() asks again after one is used
+export function openViewer(items, index, { actions = null } = {}) {
   viewer.items = items;
   viewer.index = index;
+  viewer.actions = actions;
   renderViewer();
   const dialog = $("#viewer");
   if (!dialog.open) dialog.showModal();
@@ -43,9 +46,21 @@ function renderViewer() {
     details.length ? ` · ${details.join(" · ")}` : "",
     gallery,
   );
+  renderActions();
   $("#viewer-count").textContent = `${viewer.index + 1} / ${viewer.items.length}`;
   $("#viewer-prev").disabled = viewer.index === 0;
   $("#viewer-next").disabled = viewer.index === viewer.items.length - 1;
+}
+
+function renderActions() {
+  const box = $("#viewer-actions");
+  const nodes = viewer.actions ? [viewer.actions(viewer.items[viewer.index].post)].flat().filter(Boolean) : [];
+  box.replaceChildren(...nodes);
+  box.hidden = !nodes.length;
+}
+
+export function refreshViewer() {
+  if ($("#viewer").open && viewer.items.length) renderActions();
 }
 
 function stepViewer(delta) {
@@ -55,7 +70,7 @@ function stepViewer(delta) {
   renderViewer();
 }
 
-function closeViewer() {
+export function closeViewer() {
   const dialog = $("#viewer");
   $("#viewer-stage").replaceChildren(); // stops any playing media
   if (dialog.open) dialog.close();
@@ -66,7 +81,10 @@ export function setUpViewer() {
   $("#viewer-prev").addEventListener("click", () => stepViewer(-1));
   $("#viewer-next").addEventListener("click", () => stepViewer(1));
   $("#viewer-close").addEventListener("click", closeViewer);
-  dialog.addEventListener("close", () => $("#viewer-stage").replaceChildren());
+  dialog.addEventListener("close", () => {
+    $("#viewer-stage").replaceChildren();
+    viewer.actions = null;
+  });
   dialog.addEventListener("keydown", (event) => {
     if (event.key === "ArrowLeft") stepViewer(-1);
     if (event.key === "ArrowRight") stepViewer(1);
