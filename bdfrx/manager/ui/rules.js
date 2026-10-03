@@ -22,6 +22,22 @@ const SECTIONS = {
     placeholder: "Website, e.g. example.com",
     label: (value) => value,
   },
+  exclude_title: {
+    title: "Title filters",
+    empty: "No title filters.",
+    help: "Posts whose title matches one of these are skipped (regular expressions, ignoring case; e.g. \\[M4 for [M4F]-style tags). A source can turn these off in its Edit panel.",
+    placeholder: "Pattern, e.g. \\[M4",
+    label: (value) => value,
+    code: true,
+  },
+  exclude_flair: {
+    title: "Flair filters",
+    empty: "No flair filters.",
+    help: "Posts whose flair matches one of these are skipped (regular expressions, ignoring case). A source can turn these off in its Edit panel.",
+    placeholder: "Pattern, e.g. ^meta$",
+    label: (value) => value,
+    code: true,
+  },
   exclude_post: {
     title: "Excluded posts",
     empty: "No posts are excluded.",
@@ -92,7 +108,7 @@ function render() {
   replaceWith(
     $("#rules-body"),
     ignoredSection(byKind("ignore_user")),
-    ...["skip_subreddit", "skip_domain", "exclude_post"].map((kind) => listSection(kind, byKind(kind))),
+    ...["skip_subreddit", "skip_domain", "exclude_title", "exclude_flair", "exclude_post"].map((kind) => listSection(kind, byKind(kind))),
     dismissedSection(),
   );
 }
@@ -217,7 +233,7 @@ function listSection(kind, rules) {
               {},
               section.link
                 ? h("a", { class: "job-name", href: section.link(rule.value), target: "_blank", rel: "noopener noreferrer" }, section.label(rule.value))
-                : h("span", { class: "job-name" }, section.label(rule.value)),
+                : h(section.code ? "code" : "span", { class: "job-name" }, section.label(rule.value)),
               h("span", { class: "muted" }, `since ${timeAgo(rule.created_at)}`),
               rule.reason ? h("span", { class: "muted rule-reason" }, `“${rule.reason}”`) : null,
               h("span", { class: "rule-actions" }, h("button", { type: "button", onclick: () => removeRule(rule) }, "Remove")),

@@ -161,6 +161,32 @@ ALTER TABLE jobs ADD COLUMN not_before TEXT;
 CREATE INDEX IF NOT EXISTS jobs_order ON jobs (state, priority DESC, queued_at, id);
 """
 
+# The gender filter becomes general title and flair filters: rules (so the rules table's kinds widen), and a
+# per-source switch to leave them off. An existing setup keeps filtering what it filtered (the default was male).
+_SCHEMA_V10 = r"""
+CREATE TABLE rules_v10 (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (
+        kind IN ('ignore_user', 'exclude_post', 'skip_subreddit', 'skip_domain', 'exclude_title', 'exclude_flair')
+    ),
+    value TEXT NOT NULL COLLATE NOCASE,
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (kind, value)
+);
+INSERT INTO rules_v10 (id, kind, value, reason, created_at) SELECT id, kind, value, reason, created_at FROM rules;
+DROP TABLE rules;
+ALTER TABLE rules_v10 RENAME TO rules;
+INSERT OR IGNORE INTO rules (kind, value, reason)
+    SELECT 'exclude_title', CASE gender WHEN 'male' THEN '\[M4.*?\]' ELSE '\[F4.*?\]' END, 'was the gender filter'
+    FROM (SELECT COALESCE((SELECT value FROM settings WHERE key = 'default_filter_gender'), 'male') AS gender)
+    WHERE gender IN ('male', 'female') AND EXISTS (SELECT 1 FROM sources);
+ALTER TABLE sources ADD COLUMN post_filters INTEGER NOT NULL DEFAULT 1;
+UPDATE sources SET post_filters = 0 WHERE filter_gender = 'none';
+ALTER TABLE sources DROP COLUMN filter_gender;
+DELETE FROM settings WHERE key = 'default_filter_gender';
+"""
+
 # Index i holds the script that upgrades a database from version i to version i + 1
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -172,6 +198,7 @@ _MIGRATIONS = (
     _SCHEMA_V7,
     _SCHEMA_V8,
     _SCHEMA_V9,
+    _SCHEMA_V10,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 

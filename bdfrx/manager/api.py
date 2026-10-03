@@ -24,10 +24,9 @@ logger = logging.getLogger(__name__)
 
 SourceKind = Literal["user", "subreddit"]
 SourceStatus = Literal["active", "paused", "banned"]
-RuleKind = Literal["ignore_user", "exclude_post", "skip_subreddit", "skip_domain"]
+RuleKind = Literal["ignore_user", "exclude_post", "skip_subreddit", "skip_domain", "exclude_title", "exclude_flair"]
 Sort = Literal["hot", "top", "new", "controversial", "rising", "relevance"]
 Time = Literal["all", "hour", "day", "week", "month", "year"]
-Gender = Literal["male", "female", "none"]
 
 
 class SourceFields(BaseModel):
@@ -37,7 +36,7 @@ class SourceFields(BaseModel):
     status: Optional[SourceStatus] = None
     sort: Optional[Sort] = None
     time: Optional[Time] = None
-    filter_gender: Optional[Gender] = None
+    post_filters: Optional[bool] = Field(default=None, description="Whether the title and flair filter rules apply")
     min_score: Optional[int] = None
     post_limit: Optional[int] = Field(default=None, ge=1)
     note: Optional[str] = None

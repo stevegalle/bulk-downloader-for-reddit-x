@@ -152,10 +152,16 @@ def test_import_directories(conn: sqlite3.Connection, tmp_path: Path):
 
 
 def test_build_command(conn: sqlite3.Connection):
-    service.add_source(conn, "user", "alice", filter_gender="none", min_score=3, extra_args="--max-wait-time 5")
+    service.add_source(conn, "user", "alice", post_filters=False, min_score=3, extra_args="--max-wait-time 5")
     service.add_source(conn, "subreddit", "pics")
     settings = service.get_settings(conn)
-    rules = {"ignore_user": ["spammer"], "skip_domain": ["example.com"], "skip_subreddit": ["boring"]}
+    rules = {
+        "ignore_user": ["spammer"],
+        "skip_domain": ["example.com"],
+        "skip_subreddit": ["boring"],
+        "exclude_title": [r"\[M4", "-dash first"],
+        "exclude_flair": ["^meta$"],
+    }
     user_cmd = runner.build_command(
         settings,
         service.get_source(conn, "user", "alice"),
@@ -170,7 +176,7 @@ def test_build_command(conn: sqlite3.Connection):
         "--user",
     ]
     assert "--submitted" in user_cmd
-    assert "--filter-gender" not in user_cmd
+    assert not [arg for arg in user_cmd if arg.startswith(("--exclude-title", "--exclude-flair"))]  # filters off
     assert user_cmd[user_cmd.index("--min-score") + 1] == "3"
     assert user_cmd[user_cmd.index("--db-file") + 1].endswith("/.config/bdfrx/userdbs/alice.db")
     assert user_cmd[user_cmd.index("--exclude-id-file") + 1] == "ids.txt"
@@ -180,7 +186,11 @@ def test_build_command(conn: sqlite3.Connection):
     assert "--submitted" not in sub_cmd
     assert "--db-file" not in sub_cmd
     assert sub_cmd[sub_cmd.index("--sort") + 1] == "top"
-    assert sub_cmd[sub_cmd.index("--filter-gender") + 1] == "male"
+    assert [arg for arg in sub_cmd if arg.startswith(("--exclude-title", "--exclude-flair"))] == [
+        r"--exclude-title=\[M4",
+        "--exclude-title=-dash first",
+        "--exclude-flair=^meta$",
+    ]
     for flag, value in (("--ignore-user", "spammer"), ("--skip-domain", "example.com"), ("--skip-subreddit", "boring")):
         assert sub_cmd[sub_cmd.index(flag) + 1] == value
 
@@ -1303,3 +1313,31 @@ def test_runs_pass_since(conn: sqlite3.Connection, fake_bdfrx: Path):
     assert "--since" not in seed["command"]
     [plan] = runner.run(conn, dry_run=True)
     assert "--since" in plan["command"]
+
+
+def test_gender_filter_migrates_to_rules(tmp_path: Path):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    for script in db._MIGRATIONS[:9]:  # noqa: SLF001
+        old.executescript(script)
+    old.execute("PRAGMA user_version = 9;")
+    old.execute("INSERT INTO sources (kind, name, filter_gender) VALUES ('user', 'alice', 'none');")
+    old.execute("INSERT INTO sources (kind, name) VALUES ('subreddit', 'pics');")
+    old.execute("INSERT INTO rules (kind, value) VALUES ('ignore_user', 'spammer');")
+    old.commit()
+    old.close()
+
+    conn = db.connect(path)
+    rules = [(r["kind"], r["value"], r["reason"]) for r in service.list_rules(conn)]
+    assert rules == [("exclude_title", r"\[M4.*?\]", "was the gender filter"), ("ignore_user", "spammer", None)]
+    assert service.get_source(conn, "user", "alice")["post_filters"] == 0
+    assert service.get_source(conn, "subreddit", "pics")["post_filters"] == 1
+    assert "filter_gender" not in service.get_source(conn, "subreddit", "pics")
+    assert "default_filter_gender" not in service.get_settings(conn)
+
+    # A new database starts with no title filters, and patterns are checked
+    fresh = db.connect(tmp_path / "new.db")
+    assert service.list_rules(fresh) == []
+    with pytest.raises(service.ManagerError, match="regular expression"):
+        service.add_rule(fresh, "exclude_title", "[unclosed")
+    assert service.add_rule(fresh, "exclude_flair", " ^Meta$ ")["value"] == "^Meta$"

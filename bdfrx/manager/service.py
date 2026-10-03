@@ -7,14 +7,14 @@ from typing import Any, Optional
 
 SOURCE_KINDS = ("user", "subreddit")
 SOURCE_STATUSES = ("active", "paused", "banned")
-RULE_KINDS = ("ignore_user", "exclude_post", "skip_subreddit", "skip_domain")
+RULE_KINDS = ("ignore_user", "exclude_post", "skip_subreddit", "skip_domain", "exclude_title", "exclude_flair")
 SORTS = ("hot", "top", "new", "controversial", "rising", "relevance")
 TIMES = ("all", "hour", "day", "week", "month", "year")
-GENDERS = ("male", "female", "none")
 
 # Per-source columns that override a global default when not NULL
-SOURCE_OVERRIDES = ("sort", "time", "filter_gender", "min_score", "post_limit", "extra_args")
-SOURCE_EDITABLE = ("status", "note", *SOURCE_OVERRIDES)
+SOURCE_OVERRIDES = ("sort", "time", "min_score", "post_limit", "extra_args")
+# post_filters: whether the exclude_title and exclude_flair rules apply to the source (on unless turned off)
+SOURCE_EDITABLE = ("status", "note", "post_filters", *SOURCE_OVERRIDES)
 
 DEFAULT_SETTINGS = {
     "dest_root": "/mnt/c/bdfrx",
@@ -26,7 +26,6 @@ DEFAULT_SETTINGS = {
     "folder_scheme": ".",
     "default_sort": "new",
     "default_time": "day",
-    "default_filter_gender": "male",
     "history_db_user": "~/.config/bdfrx/userdbs/{name}.db",
     "history_db_subreddit": "",
     "log_dir": "",
@@ -52,7 +51,6 @@ SETTING_HELP = {
     "folder_scheme": "bdfrx --folder-scheme",
     "default_sort": f"Sort used when a source has none: {', '.join(SORTS)}",
     "default_time": f"Time filter used when a source has none: {', '.join(TIMES)}",
-    "default_filter_gender": f"Gender filter used when a source has none: {', '.join(GENDERS)}",
     "history_db_user": "bdfrx --db-file for user sources; {name} gives each its own DB; empty uses bdfrx's default",
     "history_db_subreddit": "bdfrx --db-file for subreddit sources; {name} gives each its own DB; empty: bdfrx default",
     "log_dir": "Where per-run logs and the lock file go; empty means <config dir>/manager",
@@ -124,6 +122,15 @@ def normalize_rule_value(kind: str, value: str) -> str:
         if not re.fullmatch(r"[a-z0-9]{4,10}", value, re.IGNORECASE):
             raise ManagerError(f"{value!r} is not a valid post ID or link")
         return value.lower()
+    if kind in ("exclude_title", "exclude_flair"):
+        # Regular expressions, searched for case-insensitively by bdfrx
+        if not value:
+            raise ManagerError("A pattern is needed")
+        try:
+            re.compile(value, re.IGNORECASE)
+        except re.error as e:
+            raise ManagerError(f"{value!r} is not a valid regular expression: {e}")
+        return value
     if kind == "skip_domain":
         value = re.sub(r"^https?://", "", value.lower()).split("/")[0]
         if not value or "." not in value:
@@ -144,7 +151,10 @@ def _validate_source_fields(fields: dict) -> None:
     _check_choice("status", fields.get("status"), SOURCE_STATUSES)
     _check_choice("sort", fields.get("sort"), SORTS)
     _check_choice("time", fields.get("time"), TIMES)
-    _check_choice("filter_gender", fields.get("filter_gender"), GENDERS)
+    if "post_filters" in fields:
+        if fields["post_filters"] not in (True, False, 0, 1):
+            raise ManagerError("post_filters must be true or false")
+        fields["post_filters"] = int(fields["post_filters"])
     for field in ("min_score", "post_limit"):
         if fields.get(field) is not None and not isinstance(fields[field], int):
             raise ManagerError(f"{field} must be an integer")
@@ -181,7 +191,6 @@ def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
 _SETTING_CHOICES = {
     "default_sort": SORTS,
     "default_time": TIMES,
-    "default_filter_gender": GENDERS,
     "follow_download_time": TIMES,
 }
 

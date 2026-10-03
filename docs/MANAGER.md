@@ -41,7 +41,6 @@ Importing again only adds names that are not already in the database.
 | `staging_root`           | empty: download straight into `dest_root`    |
 | `default_sort`           | `new`                                        |
 | `default_time`           | `day`                                        |
-| `default_filter_gender`  | `male`                                       |
 | `history_db_user`        | `~/.config/bdfrx/userdbs/{name}.db`          |
 | `history_db_subreddit`   | empty: bdfrx's default database              |
 
@@ -100,9 +99,18 @@ bdfrx-manager ignore some_user --reason "reposts"    # never download their post
 bdfrx-manager exclude https://www.reddit.com/r/x/comments/abc123/...   # never download this post
 bdfrx-manager rule add skip_subreddit somesub        # skip posts in this subreddit (also skips it as a source)
 bdfrx-manager rule add skip_domain example.com
+bdfrx-manager rule add exclude_title '\[M4' --reason "[M4F]-style tags"   # skip posts whose title matches
+bdfrx-manager rule add exclude_flair '^meta$'        # skip posts whose flair matches
 bdfrx-manager rule list
 bdfrx-manager rule remove skip_domain example.com
+bdfrx-manager set user someone --no-filters          # this source ignores the title and flair rules
 ```
+
+Title and flair rules are regular expressions, searched for anywhere in the title or flair, ignoring case. Each run gets
+them as bdfrx's `--exclude-title` and `--exclude-flair`, unless the source has them turned off (`--no-filters`, or the
+switch in its Edit panel). For "only posts matching…", put bdfrx's `--include-title` or `--include-flair` in that
+source's extra arguments. Upgrading from the old gender filter turns it into the equivalent title rule,
+`\[M4.*?\]`, with the reason "was the gender filter"; a source that had it set to `none` gets filters off.
 
 ## Candidate users
 

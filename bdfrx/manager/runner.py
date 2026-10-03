@@ -66,7 +66,7 @@ def effective_options(settings: dict[str, str], source: dict) -> dict:
     return {
         "sort": source["sort"] or settings["default_sort"],
         "time": source["time"] or settings["default_time"],
-        "filter_gender": source["filter_gender"] or settings["default_filter_gender"],
+        "post_filters": bool(source["post_filters"]),
         "min_score": source["min_score"],
         "post_limit": source["post_limit"],
         "extra_args": source["extra_args"],
@@ -191,8 +191,6 @@ def build_command(  # noqa: PLR0912
     if history_db := history_db_path(settings, source):
         cmd += ["--db-file", str(history_db)]
 
-    if opts["filter_gender"] != "none":
-        cmd += ["--filter-gender", opts["filter_gender"]]
     if opts["min_score"] is not None:
         cmd += ["--min-score", str(opts["min_score"])]
     if opts["post_limit"] is not None:
@@ -205,6 +203,12 @@ def build_command(  # noqa: PLR0912
         cmd += ["--skip-subreddit", subreddit]
     for domain in rules.get("skip_domain", []):
         cmd += ["--skip-domain", domain]
+    if opts["post_filters"]:
+        # As one argument, so a pattern starting with "-" isn't read as an option
+        for pattern in rules.get("exclude_title", []):
+            cmd.append(f"--exclude-title={pattern}")
+        for pattern in rules.get("exclude_flair", []):
+            cmd.append(f"--exclude-flair={pattern}")
     for kind, path in files.items():
         cmd += [RULE_FILES[kind][1], str(path)]
 

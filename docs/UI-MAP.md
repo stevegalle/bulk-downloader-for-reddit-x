@@ -73,7 +73,7 @@ lists what it's called in the code (`#hash` address, element id, file), for find
   - **Card thumbnail**: a random image of theirs, a new one each visit; tap → **Gallery**
   - **Status pill** (active / paused / banned) and **queue mark** ("queued" / "downloading…")
   - **Card stats**: last run ✓/✗, new, total
-  - **Override chips**: their settings that differ from the defaults (sort new, min score 10…)
+  - **Override chips**: their settings that differ from the defaults (sort new, min score 10, title filters off…)
   - **Note**
   - **Card buttons**: **Download** with its **▾ menu** (last week, all time), **Pause/Resume**, **Edit**, and the
     **⋯ menu** (Ignore everywhere…, Remove…)
@@ -81,7 +81,8 @@ lists what it's called in the code (`#hash` address, element id, file), for find
 - **Edit panel** (`#source-sheet`, "sheet" in the code): opened by Edit. From top to bottom:
   - **panel thumbnail**
   - **stats**
-  - **Settings form** (Status, Sort, Time window, Gender filter, Minimum score, Posts per run, Note)
+  - **Settings form** (Status, Sort, Time window, **Apply the title and flair filters**, Minimum score, Posts per
+    run, Note)
   - for users, **Subreddits they post in**, each with follow / skip
   - **Recent runs**
 
@@ -142,8 +143,8 @@ Not a tab. Opened from a **card thumbnail**, **Gallery →** on Latest, or Edit.
   - since, reason
   - "N files set aside · **review**" (→ set-aside gallery)
   - **Unignore & restore files** / **Unignore only**
-- **Skipped subreddits**, **Skipped websites**, **Excluded posts**: each has an **add form** (value, Why, Add) and rows
-  with **Remove**
+- **Skipped subreddits**, **Skipped websites**, **Title filters**, **Flair filters**, **Excluded posts**: each has an
+  **add form** (value, Why, Add) and rows with **Remove**. Title and flair filters are regular expressions
 - **Dismissed candidates**: rows with **Undismiss**
 
 ## Settings `#settings` (settings.js)

@@ -36,7 +36,9 @@ def _override(value: Optional[str], *, as_int: bool = False) -> Any:
 def _override_fields(**options: Optional[str]) -> dict:
     int_fields = {"min_score", "post_limit"}
     return {
-        field: _override(value, as_int=field in int_fields) for field, value in options.items() if value is not None
+        field: value if isinstance(value, bool) else _override(value, as_int=field in int_fields)
+        for field, value in options.items()
+        if value is not None
     }
 
 
@@ -44,6 +46,8 @@ def _format_source(source: dict) -> str:
     overrides = [f"{field}={source[field]}" for field in service.SOURCE_OVERRIDES if source[field] is not None]
     last = f"last {source['last_run_at']} {source['last_status']}" if source["last_run_at"] else "never run"
     parts = [f"{source['kind']:<9} {source['name']:<24} {source['status']:<7} {last}"]
+    if not source["post_filters"]:
+        overrides.append("filters=off")
     if overrides:
         parts.append(" ".join(overrides))
     if source["note"]:
@@ -74,10 +78,10 @@ def _source_options(func):  # noqa: ANN001, ANN202
         click.option("--sort", type=click.Choice((*service.SORTS, CLEAR)), help="Sort order override"),
         click.option("--time", type=click.Choice((*service.TIMES, CLEAR)), help="Time filter override"),
         click.option(
-            "--gender",
-            "filter_gender",
-            type=click.Choice((*service.GENDERS, CLEAR)),
-            help="Gender filter override ('none' turns it off for this source)",
+            "--filters/--no-filters",
+            "post_filters",
+            default=None,
+            help="Whether the title and flair filter rules apply to this source (they do unless turned off)",
         ),
         click.option("--min-score", help=f"Minimum score override ('{CLEAR}' to clear)"),
         click.option("--limit", "post_limit", help=f"Maximum posts per run ('{CLEAR}' to clear)"),

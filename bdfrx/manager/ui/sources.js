@@ -25,7 +25,6 @@ const FILTER_STORAGE = "bdfrx_manager_source_filters";
 const CHUNK = 40;
 const SORTS = ["hot", "top", "new", "controversial", "rising", "relevance"];
 const TIMES = ["all", "hour", "day", "week", "month", "year"];
-const GENDERS = ["male", "female", "none"];
 
 const page = {
   started: false,
@@ -226,7 +225,7 @@ function overrideChips(source) {
   const chips = [];
   if (source.sort) chips.push(`sort ${source.sort}`);
   if (source.time) chips.push(`time ${source.time}`);
-  if (source.filter_gender) chips.push(`gender ${source.filter_gender}`);
+  if (!source.post_filters) chips.push("title filters off");
   if (source.min_score !== null) chips.push(`min score ${source.min_score}`);
   if (source.post_limit !== null) chips.push(`limit ${source.post_limit}`);
   if (source.extra_args) chips.push("extra args");
@@ -389,7 +388,7 @@ async function removeSource(source) {
   page.cards.delete(keyOf(source));
   updateCounts();
   const restore = {};
-  for (const field of ["status", "sort", "time", "filter_gender", "min_score", "post_limit", "note"]) {
+  for (const field of ["status", "sort", "time", "post_filters", "min_score", "post_limit", "note"]) {
     if (source[field] !== null && source[field] !== undefined) restore[field] = source[field];
   }
   toast(`Removed ${sourceLabel(source.kind, source.name)}`, {
@@ -483,7 +482,7 @@ function openAddDialog() {
 
 function setUpSheet() {
   const form = $("#sheet-form");
-  const choices = { sort: SORTS, time: TIMES, filter_gender: GENDERS };
+  const choices = { sort: SORTS, time: TIMES };
   for (const [field, values] of Object.entries(choices)) {
     form[field].replaceChildren(h("option", { value: "" }, "Default"), ...values.map((v) => h("option", { value: v }, v)));
   }
@@ -496,7 +495,7 @@ function setUpSheet() {
       status: form.status.value,
       sort: form.sort.value || null,
       time: form.time.value || null,
-      filter_gender: form.filter_gender.value || null,
+      post_filters: form.post_filters.checked,
       min_score: number_(form.min_score.value),
       post_limit: number_(form.post_limit.value),
       note: form.note.value.trim() || null,
@@ -528,7 +527,8 @@ async function openSheet(source) {
   img.addEventListener("error", () => img.remove(), { once: true });
   thumb.append(img);
   form.status.value = source.status;
-  for (const field of ["sort", "time", "filter_gender"]) form[field].value = source[field] || "";
+  for (const field of ["sort", "time"]) form[field].value = source[field] || "";
+  form.post_filters.checked = Boolean(source.post_filters);
   form.min_score.value = source.min_score ?? "";
   form.post_limit.value = source.post_limit ?? "";
   form.note.value = source.note || "";
@@ -548,7 +548,7 @@ async function openSheet(source) {
     if (sheet.source !== source) return;
     const effective = detail.effective_options;
     // Show what "Default" means for each setting
-    for (const field of ["sort", "time", "filter_gender"]) form[field].options[0].textContent = `Default (${effective[field]})`;
+    for (const field of ["sort", "time"]) form[field].options[0].textContent = `Default (${effective[field]})`;
     const row = (label, value) => [h("dt", {}, label), h("dd", {}, value)];
     $("#sheet-stats").replaceChildren(
       h(

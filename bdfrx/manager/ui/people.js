@@ -10,7 +10,7 @@
 import { refresh as refreshDownloads } from "./activity.js";
 import { api, confirmIgnore, h, ignoreMessage, ignoreUser, redditLink, toast, unignoreUser } from "./lib.js";
 
-const SOURCE_FIELDS = ["status", "sort", "time", "filter_gender", "min_score", "post_limit", "note"];
+const SOURCE_FIELDS = ["status", "sort", "time", "post_filters", "min_score", "post_limit", "note"];
 const sourcePath = (kind, name) => `/sources/${kind}/${encodeURIComponent(name)}`;
 
 // named: also show who or where, as a link (the viewer; cards already name both)

@@ -95,13 +95,6 @@ const SECTIONS = [
         type: "select",
         choices: TIME_CHOICES,
       },
-      {
-        key: "default_filter_gender",
-        label: "Skip posts tagged for",
-        help: "Uses the [M4F]-style tags in post titles.",
-        type: "select",
-        choices: [["male", "Men (skip [M4…] posts)"], ["female", "Women (skip [F4…] posts)"], ["none", "Don't filter"]],
-      },
     ],
   },
   {
