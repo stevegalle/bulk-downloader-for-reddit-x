@@ -235,11 +235,11 @@ off) waits for the next one rather than catching up. The time it last did so is 
   Ignore and Remove; Add and Run all active
 - **Gallery** (click a source's thumbnail on Sources, or "Open gallery" in its Edit panel or Latest tab): everything in
   the source's archive folder, newest post first (by post ID), gallery posts grouped, filter images or videos, open in
-  the full-screen viewer; `#gallery/u/name` or `#gallery/r/name`. In a subreddit's gallery the viewer shows who posted
-  each file, whether you follow or ignore them, and Follow, Unfollow and Ignore; in a person's, the subreddit with
-  Follow or Skip. Only files inside that source's own folder are served
+  the full-screen viewer; `#gallery/u/name` or `#gallery/r/name`. Only files inside that source's own folder are served
 - **Latest**: what runs downloaded, newest first. Posts from subreddits offer Follow/Ignore for their author; posts
-  from people you follow offer Follow/Skip for their subreddit
+  from people you follow offer Follow/Skip for their subreddit. Once followed: Resume (if paused) and Unfollow
+- **The full-screen viewer**, wherever it's opened (Candidates, Latest, Gallery), has the same controls in its bar for
+  the post on screen: who posted it or where, whether you follow, ignore or skip them, and the buttons to change that
 - **Runs**: the activity panel (downloading, waiting, recently finished, with live logs and cancel); a summary of the
   last day or week with new files per day for 30 days; what needs attention (sources failing repeatedly, failed or
   interrupted runs, files that couldn't be fetched, deactivations); and the run history with filters, logs (errors

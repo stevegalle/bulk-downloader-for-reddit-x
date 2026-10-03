@@ -156,6 +156,7 @@ def test_candidate_posts_and_files(client: TestClient, tmp_path: Path):
     folder = _media_setup(tmp_path)
     [post] = client.get("/candidates/alice/posts").json()
     assert post["post_id"] == "aaa111"
+    assert (post["author_status"], post["author_ignored"], post["subreddit_skipped"]) == (None, False, False)
     assert [(f["name"], f["kind"], f["url"]) for f in post["files"]] == [
         ("alice_pics_aaa111_10.jpg", "image", "/posts/aaa111/files/0"),
         ("alice_pics_aaa111_10_2.jpg", "image", "/posts/aaa111/files/1"),

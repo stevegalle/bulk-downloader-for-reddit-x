@@ -1,12 +1,10 @@
 // A source's gallery (#gallery/u/name, #gallery/r/name): everything in its archive folder as a grid of thumbnails,
 // newest post first, with gallery posts grouped. #gallery/ignored/name shows someone's set-aside files the same way.
-// Tapping one opens the full-screen viewer, whose bar shows who posted it (in a subreddit's gallery) or where (in a
-// person's), with Follow, Unfollow, Ignore or Skip.
+// Tapping one opens the full-screen viewer.
 
-import { refresh as refreshDownloads } from "./activity.js";
-import { $, api, confirmIgnore, h, ignoreMessage, ignoreUser, number, redditLink, sourceLabel, storage, toast, unignoreUser } from "./lib.js";
-import { followSubreddit, skipSubreddit } from "./sources.js";
-import { closeViewer, openViewer, refreshViewer, viewerItems } from "./viewer.js";
+import { $, api, h, number, redditLink, sourceLabel, storage } from "./lib.js";
+import { applyChange } from "./people.js";
+import { closeViewer, openViewer, viewerItems } from "./viewer.js";
 
 const PAGE_SIZE = 60;
 const FILTER_STORAGE = "bdfrx_manager_gallery_filters";
@@ -87,7 +85,7 @@ async function loadMore() {
     page.offset += result.posts.length;
     page.total = result.total_posts;
     page.done = page.offset >= result.total_posts;
-    page.posts.push(...result.posts);
+    page.posts.push(...result.posts.map(forViewer));
     $("#gallery-grid").append(...result.posts.map(tile));
     $("#gallery-count").textContent = `${number(result.total_posts)} post${result.total_posts === 1 ? "" : "s"} · ${number(result.total_files)} file${result.total_files === 1 ? "" : "s"}`;
     $("#gallery-status").textContent =
@@ -111,8 +109,8 @@ function tile(post) {
     title: caption,
     onclick: () => {
       // The viewer steps through every file loaded so far, starting at this post
-      const items = viewerItems(page.posts.map(asViewerPost));
-      openViewer(items, Math.max(0, items.findIndex((item) => item.post.key === key(post))), { actions: viewerActions });
+      const items = viewerItems(page.posts);
+      openViewer(items, Math.max(0, items.findIndex((item) => item.post === post)), { onChange });
     },
   });
   const box = h("span", { class: "thumb-box" });
@@ -130,140 +128,22 @@ function tile(post) {
   return button;
 }
 
-const key = (post) => post.post_id || post.files[0].name;
-
-// The viewer expects feed-style posts; archive files have no recorded post date
-const viewerPosts = new Map();
-function asViewerPost(post) {
-  if (!viewerPosts.has(post)) {
-    viewerPosts.set(post, {
-      key: key(post),
-      post_id: post.post_id || "",
-      subreddit: post.subreddit || page.source.name,
-      score: post.score,
-      posted_at: null,
-      files: post.files,
-      gallery: post,
-    });
-  }
-  return viewerPosts.get(post);
-}
-
-// Actions in the viewer's bar
-
-// Every loaded post by the same person, or in the same subreddit, changes together
-function setOnAll(field, value, changes) {
-  for (const post of page.posts) {
-    if ((post[field] || "").toLowerCase() === value.toLowerCase()) Object.assign(post, changes);
-  }
-  refreshViewer();
-}
-
-function viewerActions(viewerPost) {
-  const post = viewerPost.gallery;
-  if (!post || page.source.setAside) return null;
-  if (page.source.kind === "subreddit") return post.author ? authorActions(post) : null;
-  return post.subreddit ? subredditActions(post) : null;
-}
-
-function authorActions(post) {
-  const name = post.author;
-  const link = h("a", { href: redditLink("user", name), target: "_blank", rel: "noopener noreferrer" }, `u/${name}`);
-  if (post.author_ignored) return [link, h("a", { class: "pill status-banned", href: "#rules", title: "Change this on the Rules page" }, "ignored")];
-  const status = post.author_status;
-  const pill = status ? h("span", { class: `pill status-${status}` }, { active: "following", paused: "following, paused" }[status] || status) : null;
-  return [
-    link,
-    pill,
-    status !== "active" ? h("button", { type: "button", class: "primary", onclick: () => follow(name) }, status === "paused" ? "Resume" : "Follow") : null,
-    status ? h("button", { type: "button", onclick: () => unfollow(name) }, "Unfollow") : null,
-    h("button", { type: "button", class: "danger", onclick: () => ignore(name) }, "Ignore"),
-  ];
-}
-
-async function follow(name) {
-  const before = page.posts.find((p) => p.author?.toLowerCase() === name.toLowerCase())?.author_status || null;
-  let result;
-  try {
-    result = await api(`/candidates/${encodeURIComponent(name)}/promote?download=true`, { method: "POST" });
-  } catch (e) {
-    toast(`Could not follow u/${name}: ${e.message}`, { error: true });
-    return;
-  }
-  setOnAll("author", name, { author_status: "active" });
-  if (result.download) refreshDownloads();
-  toast(result.download ? `Following u/${name} · downloading their posts` : `Following u/${name}`, {
-    undo: async () => {
-      if (before) await api(`/sources/user/${encodeURIComponent(name)}`, { method: "PATCH", body: { status: before } });
-      else await api(`/sources/user/${encodeURIComponent(name)}`, { method: "DELETE" });
-      setOnAll("author", name, { author_status: before });
-    },
+// What the viewer expects of a post. Archive files have no recorded post date. Set-aside files get no Follow or
+// Ignore (their author is already ignored; the Rules page handles them).
+function forViewer(post) {
+  return Object.assign(post, {
+    key: post.post_id || post.files[0].name,
+    subreddit: post.subreddit || (page.source.kind === "subreddit" ? page.source.name : null),
+    posted_at: null,
+    via: page.source.setAside ? null : page.source.kind,
   });
 }
 
-async function unfollow(name) {
-  let source;
-  try {
-    source = await api(`/sources/user/${encodeURIComponent(name)}`);
-    await api(`/sources/user/${encodeURIComponent(name)}`, { method: "DELETE" });
-  } catch (e) {
-    toast(`Could not unfollow u/${name}: ${e.message}`, { error: true });
-    return;
-  }
-  setOnAll("author", name, { author_status: null });
-  // Undo adds them back with the same settings
-  const restore = {};
-  for (const field of ["status", "sort", "time", "filter_gender", "min_score", "post_limit", "note"]) {
-    if (source[field] !== null && source[field] !== undefined) restore[field] = source[field];
-  }
-  toast(`Unfollowed u/${name} · their files stay`, {
-    undo: async () => {
-      await api("/sources", { method: "POST", body: { kind: "user", name: source.name, ...restore } });
-      setOnAll("author", name, { author_status: source.status });
-    },
-  });
-}
-
-async function ignore(name) {
-  const options = await confirmIgnore(name);
-  if (options === null) return;
-  const before = page.posts.find((p) => p.author?.toLowerCase() === name.toLowerCase())?.author_status || null;
-  let result;
-  try {
-    result = await ignoreUser(name, options);
-  } catch (e) {
-    toast(`Could not ignore u/${name}: ${e.message}`, { error: true });
-    return;
-  }
-  // Ignoring someone you follow pauses them
-  setOnAll("author", name, { author_ignored: true, author_status: before === "active" ? "paused" : before });
-  if (result.moved) {
-    // Their files left this folder, so the gallery no longer matches it
+function onChange(change) {
+  applyChange(page.posts, change);
+  if (change.moved) {
+    // Files were set aside or restored, so this folder's listing changed
     closeViewer();
     reset();
   }
-  toast(ignoreMessage(name, result), {
-    undo: async () => {
-      await unignoreUser(name, options);
-      if (before === "active") await api(`/sources/user/${encodeURIComponent(name)}`, { method: "PATCH", body: { status: "active" } });
-      setOnAll("author", name, { author_ignored: false, author_status: before });
-      if (result.moved) reset();
-    },
-  });
-}
-
-function subredditActions(post) {
-  const name = post.subreddit;
-  if (name.toLowerCase().startsWith("u_")) return null; // their own profile
-  if (post.subreddit_status) {
-    return h("span", { class: `pill status-${post.subreddit_status}` }, post.subreddit_status === "active" ? "following" : post.subreddit_status);
-  }
-  if (post.subreddit_skipped) return h("a", { class: "pill status-paused", href: "#rules", title: "Change this on the Rules page" }, "skipped");
-  // followSubreddit and skipSubreddit keep status/skipped on the object they're given
-  const sub = { name, status: null, skipped: false };
-  const sync = () => setOnAll("subreddit", name, { subreddit_status: sub.status, subreddit_skipped: sub.skipped });
-  return [
-    h("button", { type: "button", class: "primary", onclick: () => followSubreddit(sub, sync) }, `Follow r/${name}`),
-    h("button", { type: "button", onclick: () => skipSubreddit(sub, sync) }, "Skip"),
-  ];
 }

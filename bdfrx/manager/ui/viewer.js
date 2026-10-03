@@ -1,17 +1,18 @@
-// The full-screen viewer for a set of posts' files: images, videos, audio and text, with swipe and arrow keys. Whoever
-// opens it can add actions for the current post to its bar (the gallery's Follow and Ignore).
+// The full-screen viewer for a set of posts' files: images, videos, audio and text, with swipe and arrow keys. Its bar
+// has the same Follow, Unfollow, Ignore and Skip controls as Latest's cards (people.js), wherever it was opened from.
 
 import { $, h, number, timeAgo } from "./lib.js";
+import { applyChange, postControls } from "./people.js";
 
 // Full-screen viewer
 
-const viewer = { items: [], index: 0, actions: null };
+const viewer = { items: [], index: 0, onChange: null };
 
-// actions(post): the nodes to show in the bar for that post, or null; refreshViewer() asks again after one is used
-export function openViewer(items, index, { actions = null } = {}) {
+// onChange(change): after a control is used, so the page can update its own copies (see people.js)
+export function openViewer(items, index, { onChange = null } = {}) {
   viewer.items = items;
   viewer.index = index;
-  viewer.actions = actions;
+  viewer.onChange = onChange;
   renderViewer();
   const dialog = $("#viewer");
   if (!dialog.open) dialog.showModal();
@@ -53,14 +54,16 @@ function renderViewer() {
 }
 
 function renderActions() {
-  const box = $("#viewer-actions");
-  const nodes = viewer.actions ? [viewer.actions(viewer.items[viewer.index].post)].flat().filter(Boolean) : [];
-  box.replaceChildren(...nodes);
-  box.hidden = !nodes.length;
-}
-
-export function refreshViewer() {
-  if ($("#viewer").open && viewer.items.length) renderActions();
+  // Captured now, so an Undo used after the viewer closed still reaches the page that opened it
+  const { items, onChange } = viewer;
+  const changed = (change) => {
+    applyChange(items.map((item) => item.post), change);
+    onChange?.(change);
+    if ($("#viewer").open && viewer.items === items) renderActions();
+  };
+  const nodes = [postControls(items[viewer.index].post, changed, { named: true })].flat().filter(Boolean);
+  $("#viewer-actions").replaceChildren(...nodes);
+  $("#viewer-actions").hidden = !nodes.length;
 }
 
 function stepViewer(delta) {
@@ -81,10 +84,7 @@ export function setUpViewer() {
   $("#viewer-prev").addEventListener("click", () => stepViewer(-1));
   $("#viewer-next").addEventListener("click", () => stepViewer(1));
   $("#viewer-close").addEventListener("click", closeViewer);
-  dialog.addEventListener("close", () => {
-    $("#viewer-stage").replaceChildren();
-    viewer.actions = null;
-  });
+  dialog.addEventListener("close", () => $("#viewer-stage").replaceChildren());
   dialog.addEventListener("keydown", (event) => {
     if (event.key === "ArrowLeft") stepViewer(-1);
     if (event.key === "ArrowRight") stepViewer(1);

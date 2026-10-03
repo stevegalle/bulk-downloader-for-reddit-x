@@ -2,26 +2,10 @@
 // (pinnable, with a dot for ones you haven't opened since they got new posts), and either every source as its own
 // row ("By source") or one newest-first feed. A source's own tab (#latest/u/name, #latest/r/name) shows all its
 // downloads as cards: posts found in subreddits offer to follow or ignore whoever posted them, and posts from people
-// you follow offer to follow or skip the subreddit they were posted in.
+// you follow offer to follow or skip the subreddit they were posted in (the same controls as the viewer's, people.js).
 
-import { refresh as refreshDownloads } from "./activity.js";
-import {
-  $,
-  api,
-  confirmIgnore,
-  h,
-  ignoreMessage,
-  ignoreUser,
-  number,
-  redditLink,
-  sinceShort,
-  sourceLabel,
-  storage,
-  timeAgo,
-  toast,
-  unignoreUser,
-} from "./lib.js";
-import { followSubreddit, skipSubreddit } from "./sources.js";
+import { $, api, h, number, redditLink, sinceShort, sourceLabel, storage, timeAgo, toast } from "./lib.js";
+import { applyChange, postControls } from "./people.js";
 import { openViewer, viewerItems } from "./viewer.js";
 
 const DAYS = 7;
@@ -300,7 +284,7 @@ function groupTile(group, post) {
     type: "button",
     class: "group-tile",
     title: `${caption} · posted ${timeAgo(post.posted_at)}`,
-    onclick: () => openViewer(viewerItems(group.items), viewerItems(group.items).findIndex((item) => item.post === post)),
+    onclick: () => openViewer(viewerItems(group.items), viewerItems(group.items).findIndex((item) => item.post === post), { onChange }),
   });
   tile.append(thumbnail(first, post.files.length), h("span", { class: "tile-caption" }, caption));
   return tile;
@@ -336,7 +320,7 @@ function postCard(post) {
 function openPost(post) {
   // Step through this post's files, then on through the others loaded on the page
   const items = viewerItems(page.posts);
-  openViewer(items, Math.max(0, items.findIndex((item) => item.post === post)));
+  openViewer(items, Math.max(0, items.findIndex((item) => item.post === post)), { onChange });
 }
 
 function fillPost(card) {
@@ -358,90 +342,14 @@ function fillPost(card) {
       `posted ${timeAgo(post.posted_at)} · downloaded ${sinceShort(post.found_at)}`,
       fromSubreddit || inSourceTab ? "" : ` · following u/${post.source_name}`,
     ),
-    h("div", { class: "post-actions" }, fromSubreddit ? authorActions(post) : subredditActions(post)),
+    h("div", { class: "post-actions" }, postControls(post, onChange)),
   );
 }
 
-// Every card for the same author or subreddit changes together
-function refreshCards(attribute, value) {
-  for (const card of document.querySelectorAll(`#latest-list .post-card[data-${attribute}="${CSS.escape(value.toLowerCase())}"]`)) {
+// Every card for the same author or subreddit changes together, whether changed from a card or the viewer
+function onChange(change) {
+  applyChange(page.posts, change);
+  for (const card of document.querySelectorAll(`#latest-list .post-card[data-${change.field}="${CSS.escape(change.name.toLowerCase())}"]`)) {
     fillPost(card);
   }
-}
-
-function setOnAll(match, fields) {
-  for (const post of page.posts) if (match(post)) Object.assign(post, fields);
-}
-
-function authorActions(post) {
-  if (post.author_status) return h("span", { class: `pill status-${post.author_status}` }, post.author_status === "active" ? "following" : post.author_status);
-  if (post.author_ignored) return h("span", { class: "pill status-banned" }, "ignored");
-  const sameAuthor = (p) => p.author.toLowerCase() === post.author.toLowerCase();
-  return [
-    h("button", {
-      type: "button",
-      class: "primary",
-      onclick: async () => {
-        let result;
-        try {
-          result = await api(`/candidates/${encodeURIComponent(post.author)}/promote?download=true`, { method: "POST" });
-        } catch (e) {
-          toast(`Could not follow u/${post.author}: ${e.message}`, { error: true });
-          return;
-        }
-        setOnAll(sameAuthor, { author_status: "active" });
-        refreshCards("author", post.author);
-        if (result.download) refreshDownloads();
-        toast(result.download ? `Following u/${post.author} · downloading their posts` : `Following u/${post.author}`, {
-          undo: async () => {
-            await api(`/sources/user/${encodeURIComponent(post.author)}`, { method: "DELETE" });
-            setOnAll(sameAuthor, { author_status: null });
-            refreshCards("author", post.author);
-          },
-        });
-      },
-    }, `Follow u/${post.author}`),
-    h("button", {
-      type: "button",
-      class: "danger",
-      onclick: async () => {
-        const options = await confirmIgnore(post.author);
-        if (options === null) return;
-        let result;
-        try {
-          result = await ignoreUser(post.author, options);
-        } catch (e) {
-          toast(`Could not ignore u/${post.author}: ${e.message}`, { error: true });
-          return;
-        }
-        setOnAll(sameAuthor, { author_ignored: true });
-        refreshCards("author", post.author);
-        toast(ignoreMessage(post.author, result), {
-          undo: async () => {
-            await unignoreUser(post.author, options);
-            setOnAll(sameAuthor, { author_ignored: false });
-            refreshCards("author", post.author);
-          },
-        });
-      },
-    }, "Ignore"),
-  ];
-}
-
-function subredditActions(post) {
-  if (post.subreddit.toLowerCase().startsWith("u_")) return h("span", { class: "muted small" }, "their profile");
-  if (post.subreddit_status) {
-    return h("span", { class: `pill status-${post.subreddit_status}` }, post.subreddit_status === "active" ? `following r/${post.subreddit}` : post.subreddit_status);
-  }
-  if (post.subreddit_skipped) return h("span", { class: "pill status-paused" }, `skipping r/${post.subreddit}`);
-  // followSubreddit and skipSubreddit keep status/skipped on the object they're given; mirror it onto every post
-  const sub = { name: post.subreddit, status: null, skipped: false };
-  const sync = () => {
-    setOnAll((p) => p.subreddit.toLowerCase() === post.subreddit.toLowerCase(), { subreddit_status: sub.status, subreddit_skipped: sub.skipped });
-    refreshCards("subreddit", post.subreddit);
-  };
-  return [
-    h("button", { type: "button", class: "primary", onclick: () => followSubreddit(sub, sync) }, `Follow r/${post.subreddit}`),
-    h("button", { type: "button", onclick: () => skipSubreddit(sub, sync) }, "Skip"),
-  ];
 }

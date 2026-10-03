@@ -268,15 +268,26 @@ async function loadPreviews(strip) {
     strip.classList.add("none");
     return;
   }
-  // One tile per post (its first file); the viewer steps through every file
+  // One tile per post (its first file); the viewer steps through every file, with Follow and Ignore for them
+  for (const post of posts) post.via = "subreddit";
   const tiles = [];
   items.forEach((item, index) => {
     if (item.file.index !== 0) return;
-    tiles.push(previewTile(item, () => openViewer(items, index)));
+    tiles.push(previewTile(item, () => openViewer(items, index, { onChange: candidateChanged })));
   });
   strip.replaceChildren(...tiles);
 }
 
+
+// Following or ignoring someone from the viewer takes their card off the list, as its buttons do; Undo puts it back
+function candidateChanged({ field, name, changes }) {
+  if (field !== "author") return;
+  const card = [...document.querySelectorAll("#candidate-list .card")].find((c) => c.dataset.name.toLowerCase() === name.toLowerCase());
+  const gone = Boolean(changes.author_status) || Boolean(changes.author_ignored);
+  if (!card || card.hidden === gone) return;
+  card.hidden = gone;
+  candidates.offset = Math.max(0, candidates.offset + (gone ? -1 : 1));
+}
 
 function previewTile({ post, file }, onclick) {
   const tile = h("button", { type: "button", class: "tile", title: `r/${post.subreddit} · ${timeAgo(post.posted_at)}`, onclick });

@@ -26,6 +26,7 @@ lists what it's called in the code (`#hash` address, element id, file), for find
 | **Gallery** | The Gallery page (a grid of everything in one source's folder) | **gallery post** |
 | **Gallery post** | A Reddit post with several images; shown as one tile with a `1/N` badge | **Gallery** |
 | **Viewer** | The full-screen view a tile opens; swipe or arrow keys step through files | |
+| **Follow controls** | The status pill and Follow / Resume / Unfollow / Ignore (for a person) or Follow / Resume / Unfollow / Skip (for a subreddit). The same everywhere: Latest's cards and the viewer bar, from any page (people.js) | |
 
 ## Everywhere
 
@@ -47,16 +48,22 @@ lists what it's called in the code (`#hash` address, element id, file), for find
 - **Ignore dialog** (`#ignore-dialog`): "Ignore u/name?" with the **set-aside checkbox**
 - **Confirm dialog** (`#confirm-dialog`): yes/no questions such as Remove
 - **Viewer** (`#viewer`, viewer.js): **stage**, **‹ ›** arrows, and the **viewer bar** at the bottom. It holds the
-  **info line** (subreddit link, score, date), the **viewer actions** (`#viewer-actions`: filled in by the Gallery,
-  see there), the **counter** ("3 / 40") and Close. On phones the viewer actions get a row of their own. Toasts show
-  above the bar while it's open
+  **info line** (subreddit link, score, date), the **viewer actions** (`#viewer-actions`), the **counter**
+  ("3 / 40") and Close. The viewer actions are the **follow controls** for the post on screen, the same whichever
+  page opened the viewer:
+  - for a post found in a subreddit: who posted it (**u/author**) and their controls
+  - for a post from someone you follow: its subreddit and its controls
+  - none for set-aside files
+
+  On phones the viewer actions get a row of their own. Toasts show above the bar while it's open
 - **Log viewer** (`#log-dialog`, logs.js): a run's log, live while running, with **Next problem**
 
 ## Candidates `#candidates` (app.js)
 
 - **Filter bar** (`#candidate-filters`): Min posts, Posted since, Subreddit
 - **Candidate card** (`.card`): name, post count, score and last posted, **subreddit chips**, **preview strip**
-  (`.strip`: their recent posts as thumbnails, open in the viewer), and **Follow / Dismiss / Ignore**
+  (`.strip`: their recent posts as thumbnails, open in the viewer), and **Follow / Dismiss / Ignore**. Following or
+  ignoring them from the viewer takes the card off the list too
 
 ## Sources `#sources` (sources.js)
 
@@ -94,10 +101,8 @@ What runs downloaded recently.
 - A **source tab** (`#latest/u/name`, `#latest/r/name`): the **source header** (name, status, "N downloaded in the last
   7 days", **Gallery →**, **☆ Pin**), then that source's **post cards**
 - **Post card** (`.post-card`): **post thumbnail** (opens the viewer), "u/author in r/sub", posted and downloaded times,
-  and the **post buttons**:
-  - from a subreddit: **Follow u/author** / **Ignore u/author**
-  - from someone you follow: **Follow r/sub** / **Skip r/sub**
-  - a **status pill** instead, when you already follow, skip or ignore them
+  and the **follow controls**: for the author when the post came from a subreddit, for the subreddit when it came from
+  someone you follow
 
 ## Gallery `#gallery/u/name`, `#gallery/r/name` (gallery.js)
 
@@ -106,10 +111,6 @@ Not a tab. Opened from a **card thumbnail**, **Gallery →** on Latest, or Edit.
 - **Gallery header**: **← Sources**, name, "N posts · N files", **Latest downloads →**
 - **Filter bar** (`#gallery-filters`): Show (Everything / Images / Videos), Order (Newest / Oldest first)
 - **Gallery grid** of **gallery tiles**; ▶ marks videos, `1/N` marks gallery posts
-- **Viewer actions**, for the post on screen:
-  - in a subreddit's gallery: who posted it (**u/author**), a **status pill** (following / following, paused /
-    ignored), and **Follow** (or **Resume**) / **Unfollow** / **Ignore**
-  - in a person's gallery: the subreddit's **status pill** (following / skipped), or **Follow r/sub** / **Skip**
 - **Set-aside gallery** `#gallery/ignored/name`: the same page for an ignored person's set-aside files. It has
   **← Rules**, and "· set aside" after the name
 

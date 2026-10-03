@@ -344,8 +344,9 @@ def create_app(  # noqa: PLR0915
 
     @app.get("/candidates/{name}/posts")
     def candidate_posts(name: str, conn: Conn, limit: int = Query(12, ge=1, le=200)) -> list[dict]:
-        """An author's most recent posts, newest first; each file has a url to fetch it"""
-        posts = candidates.author_posts(conn, name, limit)
+        """An author's most recent posts, newest first; each file has a url to fetch it. Like the feed, each says
+        whether you follow or ignore its author and follow or skip its subreddit."""
+        posts = insights.with_statuses(conn, candidates.author_posts(conn, name, limit))
         for post in posts:
             for file in post["files"]:
                 file["url"] = f"/posts/{post['post_id']}/files/{file['index']}"

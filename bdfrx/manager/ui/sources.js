@@ -19,6 +19,7 @@ import {
   unignoreUser,
 } from "./lib.js";
 import { openLog } from "./logs.js";
+import { followSubreddit, skipSubreddit } from "./people.js";
 
 const FILTER_STORAGE = "bdfrx_manager_source_filters";
 const CHUNK = 40;
@@ -627,50 +628,10 @@ function subredditRow(sub) {
       h("a", { class: "job-name", href: redditLink("subreddit", sub.name), target: "_blank", rel: "noopener noreferrer" }, `r/${sub.name}`),
       h("span", { class: "muted" }, `${number(sub.posts)} post${sub.posts === 1 ? "" : "s"}`),
       state,
-      !sub.status && !sub.skipped ? h("button", { type: "button", class: "link", onclick: () => followSubreddit(sub, render) }, "follow") : null,
+      !sub.status && !sub.skipped ? h("button", { type: "button", class: "link", onclick: () => followSubreddit(sub, () => { render(); loadSources({ keepScroll: true }); }) }, "follow") : null,
       !sub.status && !sub.skipped ? h("button", { type: "button", class: "link", onclick: () => skipSubreddit(sub, render) }, "skip") : null,
     );
   };
   render();
   return row;
-}
-
-// Following a subreddit downloads it straight away, like following a person
-export async function followSubreddit(sub, done) {
-  let result;
-  try {
-    result = await api("/sources", { method: "POST", body: { kind: "subreddit", name: sub.name, download: true } });
-  } catch (e) {
-    toast(`Could not follow r/${sub.name}: ${e.message}`, { error: true });
-    return;
-  }
-  sub.status = "active";
-  done();
-  if (result.download) refreshDownloads();
-  if (!$("#view-sources").hidden) loadSources();
-  toast(result.download ? `Following r/${sub.name} · downloading its posts` : `Following r/${sub.name}`, {
-    undo: async () => {
-      await api(`/sources/subreddit/${encodeURIComponent(sub.name)}`, { method: "DELETE" });
-      sub.status = null;
-      done();
-    },
-  });
-}
-
-export async function skipSubreddit(sub, done) {
-  try {
-    await api("/rules", { method: "POST", body: { kind: "skip_subreddit", value: sub.name } });
-  } catch (e) {
-    toast(`Could not skip r/${sub.name}: ${e.message}`, { error: true });
-    return;
-  }
-  sub.skipped = true;
-  done();
-  toast(`Skipping r/${sub.name}: posts there won't be downloaded, from anyone`, {
-    undo: async () => {
-      await api(`/rules/skip_subreddit/${encodeURIComponent(sub.name)}`, { method: "DELETE" });
-      sub.skipped = false;
-      done();
-    },
-  });
 }
