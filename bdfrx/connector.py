@@ -27,7 +27,7 @@ from bdfrx import exceptions as errors
 from bdfrx.configuration import Configuration
 from bdfrx.download_filter import DownloadFilter
 from bdfrx.file_name_formatter import FileNameFormatter
-from bdfrx.oauth2 import OAuth2Authenticator, OAuth2TokenManager
+from bdfrx.oauth2 import OAuth2Authenticator, OAuth2TokenManager, write_config
 from bdfrx.site_authenticator import SiteAuthenticator
 
 logger = logging.getLogger(__name__)
@@ -180,8 +180,7 @@ class RedditConnector(metaclass=ABCMeta):
             )
             logger.debug(f"Setting filename restriction scheme to {self.args.filename_restriction_scheme!r}")
         # Update config on disk
-        with Path(self.config_location).open(mode="w") as file:
-            self.cfg_parser.write(file)
+        write_config(self.cfg_parser, self.config_location)
 
     def parse_disabled_modules(self) -> None:
         disabled_modules = self.args.disable_module
@@ -209,8 +208,7 @@ class RedditConnector(metaclass=ABCMeta):
                 )
                 token = oauth2_authenticator.retrieve_new_token()
                 self.cfg_parser["DEFAULT"]["user_token"] = token
-                with Path(self.config_location).open(mode="w") as file:
-                    self.cfg_parser.write(file, space_around_delimiters=True)
+                write_config(self.cfg_parser, self.config_location)
             token_manager = OAuth2TokenManager(self.cfg_parser, self.config_location)
 
             self.authenticated = True

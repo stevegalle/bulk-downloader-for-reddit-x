@@ -8,6 +8,15 @@ import pytest
 from bdfrx.oauth2 import OAuth2TokenManager
 
 
+@pytest.fixture(autouse=True)
+def isolated_config_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point bdfrx's default config folder (~/.config/bdfrx) somewhere temporary, so no test can read or rewrite the
+    real config, which holds the Reddit token. Tests that need credentials pass --config tests/test_config.cfg."""
+    config_home = tmp_path_factory.mktemp("config_home")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    return config_home
+
+
 @pytest.fixture(scope="session")
 def reddit_instance():
     return praw.Reddit(

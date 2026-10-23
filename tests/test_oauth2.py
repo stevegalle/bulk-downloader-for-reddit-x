@@ -86,3 +86,31 @@ def test_token_manager_write(example_config: configparser.ConfigParser, tmp_path
     with test_path.open() as file:
         file_contents = file.read()
     assert "user_token = changed_token" in file_contents
+
+
+def test_write_config_is_atomic_and_keeps_the_token(tmp_path: Path):
+    from bdfrx.oauth2 import write_config
+
+    location = tmp_path / "default_config.cfg"
+    config = configparser.ConfigParser()
+    config["DEFAULT"]["client_id"] = "abc"
+    config["DEFAULT"]["user_token"] = "token"
+    write_config(config, location)
+    assert "user_token = token" in location.read_text()
+    location.chmod(0o600)
+
+    # Unchanged: not rewritten
+    before = location.stat().st_mtime_ns
+    write_config(config, location)
+    assert location.stat().st_mtime_ns == before
+
+    # Changed: replaced whole, keeping its permissions, with no temporary file left behind
+    config["DEFAULT"]["user_token"] = "new"
+    write_config(config, location)
+    assert "user_token = new" in location.read_text()
+    assert location.stat().st_mode & 0o777 == 0o600
+    assert [p.name for p in tmp_path.iterdir()] == ["default_config.cfg"]
+
+    # An empty config (e.g. read while another process was writing) never overwrites it
+    write_config(configparser.ConfigParser(), location)
+    assert "user_token = new" in location.read_text()

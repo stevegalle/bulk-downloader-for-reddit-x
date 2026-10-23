@@ -1,5 +1,7 @@
 import configparser
+import io
 import logging
+import os
 import random
 import re
 import socket
@@ -102,6 +104,32 @@ class OAuth2Authenticator:
         client.close()
 
 
+def write_config(config: configparser.ConfigParser, location: Path) -> None:
+    """Save the config, which holds the Reddit token. Other bdfrx processes may read it at any moment, so it's written
+    to a temporary file beside it and swapped in: a reader sees the old file or the new one, never an emptied one.
+    Skipped when nothing changed, and never done with an empty config (that would throw the token away)."""
+    location = Path(location)
+    if not config.defaults() and not config.sections():
+        logger.error(f"Not saving an empty configuration over {location}")
+        return
+    buffer = io.StringIO()
+    config.write(buffer, space_around_delimiters=True)
+    text = buffer.getvalue()
+    try:
+        if location.read_text() == text:
+            return
+    except OSError:
+        pass
+    temporary = location.with_name(f".{location.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(text)
+        if location.exists():
+            temporary.chmod(location.stat().st_mode & 0o777)
+        temporary.replace(location)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 class OAuth2TokenManager(BaseTokenManager):
     def __init__(self, config: configparser.ConfigParser, config_location: Path) -> None:
         super().__init__()
@@ -118,6 +146,5 @@ class OAuth2TokenManager(BaseTokenManager):
 
     def post_refresh_callback(self, authorizer: prawcore.auth.BaseAuthorizer) -> None:
         self.config.set("DEFAULT", "user_token", authorizer.refresh_token)
-        with Path(self.config_location).open(mode="w") as file:
-            self.config.write(file, space_around_delimiters=True)
+        write_config(self.config, self.config_location)
         logger.log(9, f"Written OAuth2 token from authoriser to {self.config_location}")
