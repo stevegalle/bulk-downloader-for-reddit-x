@@ -117,6 +117,7 @@ const SECTIONS = [
       { key: "dest_root", label: "Archive folder" },
       { key: "staging_root", label: "Staging folder", help: "Downloads land here first, then move into the archive. Empty: straight into the archive." },
       { key: "ignored_folder", label: "Set-aside folder", help: "Inside the archive, for files of people you ignore." },
+      { key: "archive_mount", label: "Archive share", help: "Where the archive's share is mounted. While it isn't, downloads wait instead of filling this machine's disk. Empty: no check." },
       { key: "history_db_user", label: "User history" },
       { key: "history_db_subreddit", label: "Subreddit history" },
       { key: "log_dir", label: "Logs" },

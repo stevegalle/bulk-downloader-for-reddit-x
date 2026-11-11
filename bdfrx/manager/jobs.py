@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 RECENT = 10
 IDLE_POLL = 5
+ARCHIVE_POLL = 60  # how often a queue waiting for the archive share looks again
 
 # Downloads you asked for (following someone, adding a source, Download now, Run again) go ahead of bulk ones
 # (Run all, the schedule); within a priority it's first come, first served
@@ -53,6 +54,7 @@ class DownloadQueue:
         self.workers: list[threading.Thread] = []
         self.started = False
         self.stopping = False
+        self.archive_problem: Optional[str] = None  # why waiting downloads aren't starting, if they aren't
         if start:
             self.start()
 
@@ -150,6 +152,7 @@ class DownloadQueue:
                     "SELECT * FROM jobs WHERE state = 'finished' ORDER BY finished_at DESC, id DESC LIMIT ?;",
                     RECENT,
                 ),
+                "archive_problem": self.archive_problem,
             }
         finally:
             conn.close()
@@ -210,6 +213,22 @@ class DownloadQueue:
                 self.workers.append(worker)
                 worker.start()
 
+    def _note_archive(self, problem: Optional[str]) -> bool:
+        """Remember why downloads are held up because the archive's share isn't there (see runner.archive_problem),
+        or that they aren't; returns whether they are"""
+        if problem != self.archive_problem:
+            if problem:
+                logger.warning(f"Downloads waiting: {problem}")
+            elif self.archive_problem:
+                logger.info("The archive is back; downloads continue")
+        self.archive_problem = problem
+        return problem is not None
+
+    def _release(self, conn: sqlite3.Connection, job: dict) -> None:
+        """Put a claimed job back in its place in the queue, untouched"""
+        conn.execute("UPDATE jobs SET state = 'pending', started_at = NULL WHERE id = ?;", (job["id"],))
+        conn.commit()
+
     def _claim(self, conn: sqlite3.Connection) -> Optional[dict]:
         """Take the next waiting job, unless the server already runs as many as max_concurrent_downloads allows
         (checked each time, so lowering the setting takes effect without a restart)"""
@@ -234,8 +253,17 @@ class DownloadQueue:
             while not self.stopping:
                 job = self._claim(conn)
                 if job is None:
+                    if conn.execute("SELECT 1 FROM jobs WHERE state = 'pending' LIMIT 1;").fetchone() is None:
+                        self._note_archive(None)  # nothing waiting, so nothing is held up
                     with self.wake:
                         self.wake.wait(IDLE_POLL)
+                    continue
+                # Checked once a job is claimed (so one queued meanwhile can't slip past), and only then (so an idle
+                # server leaves the share be)
+                if self._note_archive(runner.archive_problem(service.get_settings(conn))):
+                    self._release(conn, job)
+                    with self.wake:
+                        self.wake.wait(ARCHIVE_POLL)
                     continue
                 self._run(conn, job)
         finally:
@@ -266,6 +294,10 @@ class DownloadQueue:
                     reason=f"rate limited by {run['rate_limited']}; queued again, not before {retry_at} UTC",
                 )
         except service.ManagerError as e:  # unfollowed, paused, ignored, or already downloading
+            if self._note_archive(runner.archive_problem(service.get_settings(conn))):
+                # The share went just after the check: this download waits for it, like the rest
+                self._release(conn, job)
+                return
             outcome.update(status="skipped", reason=str(e))
         except Exception as e:
             logger.exception(f"Download of {job['kind']} {job['name']} failed")

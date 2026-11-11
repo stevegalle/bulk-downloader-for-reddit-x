@@ -1341,3 +1341,61 @@ def test_gender_filter_migrates_to_rules(tmp_path: Path):
     with pytest.raises(service.ManagerError, match="regular expression"):
         service.add_rule(fresh, "exclude_title", "[unclosed")
     assert service.add_rule(fresh, "exclude_flair", " ^Meta$ ")["value"] == "^Meta$"
+
+
+def test_archive_problem(conn: sqlite3.Connection, tmp_path: Path):
+    settings = service.get_settings(conn)
+    assert runner.archive_problem(settings) is None  # no archive_mount: no check
+
+    mount = tmp_path / "mnt"
+    settings = {**settings, "archive_mount": str(mount), "dest_root": str(mount / "bdfrx")}
+    assert "isn't there" in runner.archive_problem(settings)
+    (mount / "bdfrx").mkdir(parents=True)  # what writing into an unmounted mount point would create
+    assert "isn't mounted" in runner.archive_problem(settings)
+    # A mount point on another filesystem than the folder it's in counts as mounted
+    assert runner.archive_problem({**settings, "archive_mount": "/proc/share"}) is None
+
+    service.set_setting(conn, "archive_mount", str(mount))
+    service.set_setting(conn, "dest_root", str(mount / "bdfrx"))
+    service.add_source(conn, "user", "alice")
+    with pytest.raises(service.ManagerError, match="isn't mounted"):
+        runner.run(conn)
+    with pytest.raises(service.ManagerError, match="isn't mounted"):
+        runner.run_one(conn, "user", "alice")
+
+
+def test_staged_files_wait_when_the_share_drops(
+    conn: sqlite3.Connection,
+    fake_bdfrx: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    use_fake(conn, fake_bdfrx)
+    service.set_setting(conn, "staging_root", str(tmp_path / "staging"))
+    service.add_source(conn, "user", "alice")
+    staged = tmp_path / "staging" / "users" / "alice" / "alice_post1.jpg"
+    archived = tmp_path / "dest" / "users" / "alice" / "alice_post1.jpg"
+
+    # The share drops while the run moves its files: they stay in staging, and the run says so
+    real_move = runner.move_staged
+    calls = []
+
+    def dropping_move(staging: Path, dest: Path) -> tuple[int, int]:
+        calls.append(staging)
+        if len(calls) == 1:
+            raise OSError(112, "Host is down")
+        return real_move(staging, dest)
+
+    monkeypatch.setattr(runner, "move_staged", dropping_move)
+    first = runner.run(conn)[0]
+    assert first["status"] == "ok"
+    assert "files left in staging until this source's next run: moving into the archive failed (Host is down)" in (
+        first["output_tail"]
+    )
+    assert staged.exists()
+    assert not archived.exists()
+
+    # The source's next run moves them in before downloading
+    runner.run(conn)
+    assert archived.exists()
+    assert not staged.exists()

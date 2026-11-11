@@ -240,6 +240,42 @@ def _files_in(directory: Path) -> set[Path]:
     return {path for path in directory.rglob("*") if path.is_file()}
 
 
+def archive_problem(settings: dict[str, str]) -> Optional[str]:
+    """Why files can't go into the archive right now, or None. Only checked when archive_mount is set: the archive
+    must then be reachable (looking at it also mounts an automounted share) and on a different filesystem from the
+    folder the mount point is in, i.e. really on the share and not in the local folder under an unmounted one."""
+    if not settings["archive_mount"]:
+        return None
+    mount = Path(settings["archive_mount"]).expanduser()
+    archive = Path(settings["dest_root"]).expanduser()
+    try:
+        if not archive.is_dir():
+            return f"the archive folder {archive} isn't there ({mount} may not be mounted)"
+        on_share = archive.stat().st_dev != mount.parent.stat().st_dev
+    except OSError as e:
+        return f"the archive folder {archive} can't be reached ({e.strerror or e})"
+    if not on_share:
+        return f"{mount} isn't mounted, so {archive} is on the local disk"
+    return None
+
+
+def _move_into_archive(
+    settings: dict[str, str],
+    source: dict,
+    download_dir: Path,
+) -> tuple[Optional[tuple[int, int]], Optional[str]]:
+    """Move a run's staged files into the archive: ((moved, already_there), None), or (None, a note for the log)
+    when the archive's share isn't there. Never into a mount point whose share has gone: the files then wait in
+    staging, and go in at the start of the source's next run."""
+    problem = archive_problem(settings)
+    if problem is None:
+        try:
+            return move_staged(download_dir, destination(settings, source)), None
+        except OSError as e:
+            problem = f"moving into the archive failed ({e.strerror or e})"
+    return None, f"[manager] files left in staging until this source's next run: {problem}"
+
+
 def move_staged(staging: Path, dest: Path) -> tuple[int, int]:
     """Move downloaded files into the archive without overwriting; returns (moved, already_present)"""
     moved = skipped = 0
@@ -405,7 +441,7 @@ def run_source(
         return _run_source(conn, source, settings, rules, files, sort_override, time_override, on_start, trigger)
 
 
-def _run_source(  # noqa: PLR0913
+def _run_source(  # noqa: PLR0913, PLR0915
     conn: sqlite3.Connection,
     source: dict,
     settings: dict[str, str],
@@ -426,6 +462,9 @@ def _run_source(  # noqa: PLR0913
         since_for(conn, settings, source, time_override),
     )
     download_dir = download_directory(settings, source)
+    if settings["staging_root"] and not archive_problem(settings):
+        # Files an earlier run couldn't move (e.g. the share dropped) go in first, so they aren't left behind
+        _move_leftovers(conn, settings, source)
     download_dir.mkdir(parents=True, exist_ok=True)
     before = _files_in(download_dir)
 
@@ -474,10 +513,15 @@ def _run_source(  # noqa: PLR0913
         final_path=lambda path: final_dir / path.relative_to(download_dir),
         author=source["name"] if source["kind"] == "user" else None,
     )
+    files_new, files_skipped = len(downloaded), 0
     if settings["staging_root"]:
-        files_new, files_skipped = move_staged(download_dir, destination(settings, source))
-    else:
-        files_new, files_skipped = len(downloaded), 0
+        moved, note = _move_into_archive(settings, source, download_dir)
+        if moved is not None:
+            files_new, files_skipped = moved
+        if note:
+            with log_path.open("a") as log_file:
+                log_file.write(f"\n{note}\n")
+            output += f"\n{note}\n"
     # Recorded only now the files are in place, so nothing (e.g. the Latest page) asks for a file still in staging
     posts_found = candidates.record_posts(conn, posts, run_id)
     # A source that yielded nothing (no new posts, or a deleted account) shouldn't leave an empty folder behind
@@ -564,10 +608,15 @@ def run(
             planned.append({"kind": source["kind"], "name": source["name"], "skipped": reason, "command": cmd})
         return planned
 
+    if problem := archive_problem(settings):
+        raise service.ManagerError(f"Not downloading: {problem}")
     results = []
     with run_lock(directory):
         write_rule_files(files, rules)
         for index, source in enumerate(sources, start=1):
+            if problem := archive_problem(settings):
+                progress(f"Stopped before {source['kind']} {source['name']}: {problem}")
+                break
             if reason := skip_reason(source, rules):
                 progress(f"[{index}/{len(sources)}] {source['kind']} {source['name']}: skipped, {reason}")
                 continue
@@ -606,6 +655,8 @@ def run_one(
         raise service.ManagerError(f"{kind} {source['name']} is {source['status']}, not active")
     if reason := skip_reason(source, rules):
         raise service.ManagerError(f"{kind} {source['name']} is not downloaded: {reason}")
+    if problem := archive_problem(settings):
+        raise service.ManagerError(f"Not downloading: {problem}")
     directory = log_dir(settings)
     files = rule_files(directory, rules)
     write_rule_files(files, rules)
@@ -655,31 +706,42 @@ def recover(conn: sqlite3.Connection, progress: Callable[[str], None] = logger.i
 
     staging_root = settings["staging_root"]
     if staging_root and Path(staging_root).expanduser().is_dir():
+        if problem := archive_problem(settings):
+            progress(f"left files in staging: {problem}")
+            return report
         for source in sources.values():
             staged = download_directory(settings, source)
             if not staged.is_dir() or source_is_busy(directory, source):
                 continue
-            leftovers = _files_in(staged)
-            if not leftovers:
-                remove_empty_dirs(staged)
-                continue
             with source_lock(directory, source):
-                final_dir = destination(settings, source)
-                posts, _ = candidates.parse_files(
-                    leftovers,
-                    source["name"] if source["kind"] == "subreddit" else None,
-                    final_path=lambda path, final_dir=final_dir, staged=staged: final_dir / path.relative_to(staged),
-                    author=source["name"] if source["kind"] == "user" else None,
-                )
-                # Credit the files to the source's last run (the interrupted one), so they show on the Latest page
-                last_run = conn.execute(
-                    "SELECT MAX(id) FROM runs WHERE source_id = ?;",
-                    (source["id"],),
-                ).fetchone()[0]
-                candidates.record_posts(conn, posts, last_run)
-                moved, skipped = move_staged(staged, destination(settings, source))
-                remove_empty_dirs(staged)
+                moved, skipped = _move_leftovers(conn, settings, source)
             report["files_recovered"] += moved
             report["files_already_there"] += skipped
-            progress(f"moved {moved} file(s) left in staging for {source['kind']} {source['name']} into the archive")
+            if moved:
+                label = f"{source['kind']} {source['name']}"
+                progress(f"moved {moved} file(s) left in staging for {label} into the archive")
     return report
+
+
+def _move_leftovers(conn: sqlite3.Connection, settings: dict[str, str], source: dict) -> tuple[int, int]:
+    """Move files left in a source's staging folder into the archive, recording their posts as a run would (bdfrx
+    has already recorded them as done, so they would otherwise never arrive). The caller holds the source's lock.
+    Returns (moved, already_there)."""
+    staged = download_directory(settings, source)
+    leftovers = _files_in(staged)
+    if not leftovers:
+        remove_empty_dirs(staged)
+        return 0, 0
+    final_dir = destination(settings, source)
+    posts, _ = candidates.parse_files(
+        leftovers,
+        source["name"] if source["kind"] == "subreddit" else None,
+        final_path=lambda path: final_dir / path.relative_to(staged),
+        author=source["name"] if source["kind"] == "user" else None,
+    )
+    # Credit the files to the source's last run (the one that downloaded them), so they show on the Latest page
+    last_run = conn.execute("SELECT MAX(id) FROM runs WHERE source_id = ?;", (source["id"],)).fetchone()[0]
+    candidates.record_posts(conn, posts, last_run)
+    moved, skipped = move_staged(staged, final_dir)
+    remove_empty_dirs(staged)
+    return moved, skipped

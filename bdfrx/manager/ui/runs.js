@@ -111,6 +111,11 @@ function renderActivity(state) {
       ? `Idle · last finished ${sinceShort(state.recent[0].finished_at)}`
       : "Idle";
   $("#activity-cancel-all").hidden = state.pending.length === 0;
+  // Downloads wait (rather than fill the local disk) while the archive's share isn't mounted
+  $("#activity-archive").hidden = !state.archive_problem;
+  $("#activity-archive").textContent = state.archive_problem
+    ? `Waiting downloads won't start: ${state.archive_problem}. They start by themselves once it's back (checked every minute).`
+    : "";
   $("#activity-panel").classList.toggle("busy", busy > 0);
 
   const label = (job) => h("span", { class: "job-name" }, sourceLabel(job.kind, job.name));

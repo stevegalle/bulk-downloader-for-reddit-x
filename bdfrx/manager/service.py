@@ -31,6 +31,7 @@ DEFAULT_SETTINGS = {
     "log_dir": "",
     "run_timeout": "3600",
     "ignored_folder": "ignored",
+    "archive_mount": "",
     "follow_download_time": "all",
     "max_concurrent_downloads": "2",
     "run_every_hours": "0",
@@ -56,6 +57,11 @@ SETTING_HELP = {
     "log_dir": "Where per-run logs and the lock file go; empty means <config dir>/manager",
     "run_timeout": "Seconds before a single bdfrx invocation is killed",
     "ignored_folder": "Folder, beside users/ and subreddits/ in the archive, that set-aside files are moved into",
+    "archive_mount": (
+        "Mount point of the share the archive is on (e.g. /mnt/c). While it isn't mounted, no downloads start and "
+        "nothing moves out of staging: an unmounted mount point is a local folder, so files would fill the local "
+        "disk and be hidden once the share is back. Empty: no check"
+    ),
     "follow_download_time": f"Time filter for the download started when you follow a candidate: {', '.join(TIMES)}",
     "max_concurrent_downloads": "How many bdfrx downloads may run at once, across the server and the CLI (1-8)",
     "run_every_hours": "The server queues every active source this often (e.g. 6, or 0.5); 0 turns the schedule off",
@@ -82,6 +88,7 @@ LOCAL_ONLY_SETTINGS = (
     "history_db_subreddit",
     "log_dir",
     "ignored_folder",
+    "archive_mount",
     # Not dangerous, but changing them over the network would quietly break things: file names are parsed for
     # candidates, previews, set-aside and history splitting, and downloads need authentication
     "file_scheme",

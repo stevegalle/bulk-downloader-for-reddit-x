@@ -44,6 +44,13 @@ function announce(job) {
 function renderPill() {
   const pill = $("#activity");
   const busy = state.running.length || state.pending.length;
+  pill.classList.toggle("problem", Boolean(state.archive_problem));
+  if (state.archive_problem && !state.running.length) {
+    pill.textContent = `Archive share missing · ${state.pending.length} waiting`;
+    pill.title = state.archive_problem;
+    pill.hidden = false;
+    return;
+  }
   if (!busy) {
     pill.hidden = true;
     return;

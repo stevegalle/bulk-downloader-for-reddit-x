@@ -213,7 +213,13 @@ def _wait_for_downloads(client: TestClient, count: int = 1) -> dict:
 def test_follow_starts_a_download(client: TestClient, fake_bdfrx: Path, tmp_path: Path):  # noqa: F811
     _configure(tmp_path / "api.db", bdfrx_command=f"{sys.executable} {fake_bdfrx}")
     _media_setup(tmp_path)
-    assert client.get("/downloads").json() == {"running": [], "pending": [], "recent": [], "slots": 2}
+    assert client.get("/downloads").json() == {
+        "running": [],
+        "pending": [],
+        "recent": [],
+        "slots": 2,
+        "archive_problem": None,
+    }
     promoted = client.post("/candidates/alice/promote").json()
     assert (promoted["status"], promoted["download"]) == ("active", "queued")
     last = _wait_for_downloads(client)["last"]
@@ -826,3 +832,45 @@ def test_set_aside_gallery(client: TestClient, tmp_path: Path):
     client.delete("/set-aside/alice")
     assert client.get(url).status_code == 404  # restored, so no longer served from here
     assert client.get("/set-aside/alice/gallery").json()["total_posts"] == 0
+
+
+def test_queue_waits_for_the_archive_share(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bdfrx: Path):  # noqa: F811
+    from bdfrx.manager import jobs
+
+    monkeypatch.setattr(jobs, "ARCHIVE_POLL", 0.1)
+    mount = tmp_path / "mnt"
+    _configure(
+        tmp_path / "api.db",
+        log_dir=str(tmp_path / "logs"),
+        dest_root=str(mount / "bdfrx"),
+        archive_mount=str(mount),
+        bdfrx_command=f"{sys.executable} {fake_bdfrx}",
+    )
+    conn = db.connect(tmp_path / "api.db")
+    service.add_source(conn, "user", "alice")
+    queue = jobs.DownloadQueue(tmp_path / "api.db")
+    try:
+        assert queue.snapshot()["archive_problem"] is None  # nothing waiting: the share isn't looked at
+        queue.add("user", "alice")
+        for _ in range(50):
+            if queue.snapshot()["archive_problem"]:
+                break
+            time.sleep(0.05)
+        state = queue.snapshot()
+        assert "isn't there" in state["archive_problem"]
+        assert [j["name"] for j in state["pending"]] == ["alice"]
+        assert not state["running"]
+
+        # The share is back (here: no check any more); the download starts by itself
+        service.set_setting(conn, "archive_mount", "")
+        (mount / "bdfrx").mkdir(parents=True)
+        for _ in range(200):
+            state = queue.snapshot()
+            if state["recent"]:
+                break
+            time.sleep(0.05)
+        assert state["recent"][0]["status"] == "ok", state["recent"][0]["reason"]
+        assert state["archive_problem"] is None
+    finally:
+        queue.stop()
+        conn.close()
