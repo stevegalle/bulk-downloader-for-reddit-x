@@ -60,7 +60,8 @@ function reset() {
   const { kind, name, setAside } = page.source;
   $("#gallery-title").replaceChildren(
     h("a", { href: redditLink(kind, name), target: "_blank", rel: "noopener noreferrer" }, sourceLabel(kind, name)),
-    setAside ? h("span", { class: "muted" }, " · set aside") : null,
+    // replaceChildren would show a missing part as the text "null"
+    setAside ? h("span", { class: "muted" }, " · set aside") : "",
   );
   $("#gallery-count").textContent = "";
   $("#gallery-latest").hidden = setAside;
