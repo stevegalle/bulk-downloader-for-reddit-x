@@ -62,6 +62,11 @@ can be reached and is on a different filesystem from the folder the mount point 
 - a run whose share drops while it moves its files leaves them in staging (its log says so); they go into the
   archive at the start of that source's next run, or when the server restarts
 
+Moves from staging never leave a cut-off file in the archive: each file is copied under a hidden temporary name
+and renamed into place once complete, and only then deleted from staging. An archive file smaller than the staged
+one (e.g. cut off by a drop before this was so) is taken to be incomplete and replaced; any other file already there
+is kept.
+
 ### History databases
 
 bdfrx remembers what it has downloaded in a history DB. `{name}` in `history_db_user` or `history_db_subreddit`

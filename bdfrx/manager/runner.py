@@ -2,6 +2,7 @@
 
 import contextlib
 import fcntl
+import glob
 import logging
 import os
 import re
@@ -277,14 +278,20 @@ def _move_into_archive(
 
 
 def move_staged(staging: Path, dest: Path) -> tuple[int, int]:
-    """Move downloaded files into the archive without overwriting; returns (moved, already_present)"""
+    """Move downloaded files into the archive without overwriting; returns (moved, already_present).
+
+    The one exception: an archive file smaller than the downloaded one is taken to be a copy cut off part way (as a
+    dropped share could leave before moves were made safe) and is replaced, rather than the good file thrown away.
+    """
     moved = skipped = 0
     for path in sorted(_files_in(staging)):
         target = dest / path.relative_to(staging)
         if target.exists():
-            path.unlink()
-            skipped += 1
-            continue
+            if target.stat().st_size >= path.stat().st_size:
+                path.unlink()
+                skipped += 1
+                continue
+            logger.warning(f"Replacing {target}: smaller than the download, so probably an incomplete copy")
         target.parent.mkdir(parents=True, exist_ok=True)
         move_file(path, target)
         moved += 1
@@ -307,16 +314,31 @@ def move_file(source: Path, target: Path) -> None:
 
     shutil.move can't be used for this: across filesystems it copies the timestamps too, and fails outright on
     shares that don't let the user set them (e.g. a CIFS mount where files are owned by root).
+
+    Across filesystems the copy goes to a hidden temporary name beside the target and is renamed into place only
+    once complete, and the source is deleted only after that: if the share drops part way, the archive never holds
+    a cut-off file under the real name, and the download is still in staging to try again.
     """
     try:
         source.rename(target)
         return
     except OSError:
         pass
-    shutil.copyfile(source, target)
-    stat = source.stat()
-    with contextlib.suppress(OSError):
-        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    # Leftovers of earlier attempts at this file that were cut off
+    for stale in target.parent.glob(f".{glob.escape(target.name)}.part-*"):
+        with contextlib.suppress(OSError):
+            stale.unlink()
+    partial = target.with_name(f".{target.name}.part-{os.getpid()}")
+    try:
+        shutil.copyfile(source, partial)
+        stat = source.stat()
+        with contextlib.suppress(OSError):
+            os.utime(partial, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        partial.replace(target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            partial.unlink()
+        raise
     source.unlink()
 
 

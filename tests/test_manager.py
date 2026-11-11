@@ -1,4 +1,5 @@
 import os
+import shutil
 import sqlite3
 import sys
 import textwrap
@@ -1399,3 +1400,54 @@ def test_staged_files_wait_when_the_share_drops(
     runner.run(conn)
     assert archived.exists()
     assert not staged.exists()
+
+
+def test_move_file_never_leaves_a_cut_off_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    staged, archive = tmp_path / "staging", tmp_path / "archive"
+    staged.mkdir()
+    archive.mkdir()
+    source = staged / "a_pics_aaa111.mp4"
+    source.write_bytes(b"x" * 1000)
+    target = archive / source.name
+    (archive / f".{source.name}.part-999").write_bytes(b"x")  # left by an earlier, killed attempt
+
+    # Across filesystems (rename fails), with the share dropping part way through the copy
+    def cross_device(self: Path, to: Path) -> None:
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(Path, "rename", cross_device)
+
+    real_copy = shutil.copyfile
+
+    def dropping_copy(src: Path, dst: Path) -> None:
+        Path(dst).write_bytes(b"x" * 300)
+        raise OSError(112, "Host is down")
+
+    monkeypatch.setattr(runner.shutil, "copyfile", dropping_copy)
+    with pytest.raises(OSError, match="Host is down"):
+        runner.move_file(source, target)
+    assert not target.exists()  # nothing under the real name
+    assert sorted(p.name for p in archive.iterdir()) == []  # its partial copy removed, the stale one too
+    assert source.read_bytes() == b"x" * 1000  # the download is still in staging
+
+    # The share is back: the next attempt completes
+    monkeypatch.setattr(runner.shutil, "copyfile", real_copy)
+    runner.move_file(source, target)
+    assert target.read_bytes() == b"x" * 1000
+    assert not source.exists()
+    assert sorted(p.name for p in archive.iterdir()) == [source.name]
+
+
+def test_move_staged_replaces_a_cut_off_copy(tmp_path: Path):
+    staging, dest = tmp_path / "staging", tmp_path / "dest"
+    staging.mkdir()
+    (staging / "cut.jpg").write_bytes(b"full image")
+    (staging / "same.jpg").write_bytes(b"new")
+    dest.mkdir()
+    (dest / "cut.jpg").write_bytes(b"full")  # smaller: cut off part way by an earlier move
+    (dest / "same.jpg").write_bytes(b"old")  # the same size: already there, kept
+
+    assert runner.move_staged(staging, dest) == (1, 1)
+    assert (dest / "cut.jpg").read_bytes() == b"full image"
+    assert (dest / "same.jpg").read_bytes() == b"old"
+    assert not list(staging.iterdir())
